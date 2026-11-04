@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-04  
 **Applies to:** `docs/tasks/LIBPNG_FIRST_TARGET.md`  
-**Status:** Technical review completed; design clarifications accepted; numeric limits pending project-owner confirmation; no harness implementation started.
+**Status:** Technical review completed; design clarifications accepted; pilot resource limits approved by project owner on 2026-11-04; no harness implementation started.
 
 This addendum records the independent review and the architecture/review lead's verification against the exact libpng `v1.6.59` source tag and current AFL++ guidance. It supplements the approved task; it does not widen the project scope.
 
@@ -66,7 +66,7 @@ Do not assume that a per-chunk allocation cap also limits total decoded image wo
 - `png_set_chunk_cache_max()` limits the number of variable ancillary chunks stored; when separate pre-IDAT and end-info structures are used, the limit applies separately to each.
 - `png_set_user_limits()` must be applied before `png_read_info()`.
 
-**Proposed initial limits for this laptop pilot (pending project-owner confirmation):**
+**Approved initial limits for this laptop pilot (project-owner approval: 2026-11-04):**
 
 | Resource | Proposed initial cap | Enforcement |
 |---|---:|---|
@@ -80,7 +80,7 @@ Do not assume that a per-chunk allocation cap also limits total decoded image wo
 | AFL execution timeout | 1,000 ms with AFL++ auto-scaling | Explicit `-t 1000+` on the later bounded campaign |
 | AFL target memory | 512 MiB | Explicit `-m 512` for the non-ASan AFL++/UBSan target |
 
-These are conservative pilot limits, not permanent platform-wide defaults. Record them in the harness and campaign metadata. Review actual WSL memory availability before the first campaign; change a limit only with a documented reason.
+These are approved conservative pilot limits, not permanent platform-wide defaults. Enforce and record them in the harness and campaign metadata. Review actual WSL memory availability before the first campaign; change a limit only with a documented reason and project-owner approval.
 
 ### 1.8 Interlaced PNGs
 
