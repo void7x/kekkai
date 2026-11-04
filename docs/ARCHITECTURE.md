@@ -1,202 +1,192 @@
 # Architecture
 
-## 1. Architecture principles
+## 1. Principles
 
-KEKKAI should be built around a small, verifiable fuzzing workflow first and expanded only after it works against a real supported target.
+KEKKAI is built around a real, reproducible native fuzzing workflow—not a dashboard or a large collection of empty modules.
 
-- **Evidence before interpretation:** AFL++ and sanitizers produce observations; analysis layers organise them.
-- **Adapters isolate target-specific details:** build steps, harnesses, seeds and dictionaries belong to target adapters.
-- **Local-first execution:** the core workflow should not depend on a remote service.
-- **Reproducibility:** preserve exact target revisions and experiment configuration.
-- **Conservative conclusions:** a crash, reproducible crash, confirmed defect and security vulnerability are distinct states.
-- **Optional extensions:** the dashboard, CASR integration and AI assistance must not be hard requirements for a fuzzing campaign.
+1. **Evidence first:** preserve what the tools actually observed.
+2. **Target adapters:** isolate target-specific build, harness and corpus details.
+3. **Validated harnesses:** a successful compile is not proof that fuzzing reaches the intended code.
+4. **Reproducibility:** every result links to exact source and experiment configuration.
+5. **Version awareness:** replay the same evidence across recorded software versions.
+6. **Conservative interpretation:** a crash is not automatically a defect or vulnerability.
+7. **Local-first and modular:** optional integrations must not block the core engine.
 
-This document describes the intended design. It is not a claim that the modules already exist.
+This is an intended architecture. The modules are not yet implemented.
 
-## 2. High-level data flow
+## 2. System data flow
 
-```text
-Target Registration
-       |
-       v
-Target Adapter -----> Source Inspection (supporting aid)
-       |
-       v
-Build and Instrumentation
-       |
-       v
-Fuzz Harness + Seed Corpus
-       |
-       v
-AFL++ Campaign <----> ASan / UBSan diagnostics
-       |
-       v
-Raw Crash Evidence
-       |
-       v
-Grouping and Reproduction
-       |
-       v
-Triage and Version Comparison
-       |
-       +------> SQLite Metadata + Filesystem Artifact Store
-       |
-       +------> Reports / Local Flask Dashboard
-                         |
-                         +---- Optional AI Analysis Service
-```
+~~~text
+Target Registry + Pinned Source Revision
+                  |
+                  v
+       Target Adapter / Build Profile
+                  |
+        +---------+---------+
+        |                   |
+        v                   v
+ Source Inspection     Native Harness
+ (later, supporting)        |
+                            v
+                 Harness + Build Validation
+                            |
+                            v
+                  AFL++ Campaign Manager
+                     + ASan / UBSan
+                            |
+                            v
+                    Raw Crash Evidence
+                            |
+                            v
+                Reproduction / Minimization
+                            |
+                            v
+                 Grouping and Human Triage
+                            |
+                            v
+              Version-aware Replay / Comparison
+                            |
+                 +----------+----------+
+                 |                     |
+                 v                     v
+          SQLite Metadata       Filesystem Artifacts
+                 |
+                 v
+           Reports / Dashboard
+                 |
+                 +---- Optional AI explanation
+~~~
 
-The optional AI service consumes selected evidence after collection. It does not control AFL++, decide whether a crash is real, or certify a vulnerability.
-
-## 3. Main components
+## 3. Components and responsibilities
 
 ### 3.1 Target registry
 
-Responsibilities:
-- register a supported target and its adapter;
-- record local source path and source revision;
-- associate a target with recorded versions;
-- validate that a requested target is explicitly supported.
-
-A target should not be launched from an arbitrary path supplied to a web request. Registration and execution permissions belong to the trusted local configuration layer.
+Stores target identity, exact upstream revision, adapter, local source path and supported build profiles. Only explicitly registered and validated targets may be launched.
 
 ### 3.2 Target adapter
 
-An adapter is the boundary between generic orchestration and one native software target. It should describe, in a reviewable configuration or implementation:
-- target identifier and source revision;
-- source/build directory;
-- build commands and required dependencies;
-- harness source and produced harness binary;
+An adapter describes one supported target:
+- upstream source and exact version/commit;
+- source and build directories;
+- dependencies and build commands;
+- selected input-processing entry point;
+- harness source and binary;
 - seed corpus and optional dictionary;
-- instrumentation and sanitizer options;
-- input/output paths and resource limits.
+- instrumentation/sanitizer options;
+- resource limits and expected execution behavior.
 
-The first adapter is planned for the candidate libpng target, subject to successful build and harness validation. Keep the adapter interface small until a second target demonstrates which abstractions are genuinely reusable.
+Keep the interface minimal until a second target proves which details are truly reusable. The pilot adapter is for libpng, conditional on feasibility.
 
-### 3.3 Source inspection helper
+### 3.3 Source inspection
 
-Clang tooling or libclang may inspect C/C++ declarations and help locate candidate input-processing functions. This is an aid for understanding source code. It does not replace a human-reviewed harness and should not be represented as automatic vulnerability detection.
+Clang tooling/libclang may later parse declarations and help locate functions that receive input buffers, streams or structured data. It should rank candidates with explainable signals and point to source locations. It does not prove reachability, synthesize a trustworthy harness by itself or detect vulnerabilities automatically.
 
-For the first working milestone, a manually selected entry point and a simple, reviewed harness are acceptable.
+The first proof of work may use a manually selected public API and manually written harness.
 
 ### 3.4 Build manager
 
-Responsibilities:
-- validate required compiler and build dependencies;
-- prepare a clean target build;
-- apply selected AFL++ instrumentation and compatible sanitizer flags;
-- capture compiler version, build options and output;
-- associate the binary with the target revision and harness identity.
+Builds the target and harness in a clean, configuration-specific directory. It captures compiler, linker, LLVM and AFL++ versions, command arguments, flags, output and resulting binary identity. It must not silently reuse outputs from a different compiler, sanitizer or instrumentation configuration.
 
-Use separate build directories for materially different compiler, sanitizer or instrumentation configurations. Do not silently reuse stale build products.
+### 3.5 Harness validation
 
-### 3.5 Fuzzing campaign manager
+Before launching a long campaign, run an explicit validation stage:
+- compilation succeeds from a clean state;
+- the harness calls the intended target API;
+- representative valid inputs reach the target and behave as expected;
+- empty and malformed inputs are handled by the harness without unrelated harness defects;
+- coverage feedback changes across representative inputs;
+- the harness is sufficiently deterministic for its configured execution mode;
+- timeout and memory settings are enforced.
 
-Responsibilities:
-- validate the target adapter and harness before launch;
-- prepare a campaign workspace and seed corpus;
-- invoke AFL++ with explicit arguments and environment;
-- enforce configured duration and resource constraints;
-- capture stdout/stderr, exit status and campaign metadata;
-- mark interrupted or failed campaigns accurately.
+The validation report should explain which checks passed, failed or were not applicable. It must not pretend that a single metric proves harness quality.
 
-The process layer should use argument arrays (not shell-concatenated command strings), a controlled working directory and validated paths. The dashboard must not expose arbitrary shell execution.
+### 3.6 Fuzzing campaign manager
 
-### 3.6 Evidence collector
+Runs AFL++ through a safe process layer. It validates adapter paths and arguments, uses argument arrays rather than shell-concatenated commands, sets a controlled working directory and captures environment/log/exit details. It supports explicit campaign duration and resource limits. A failed or interrupted campaign remains distinguishable from a successful campaign.
 
-For each observed crash, preserve:
-- original testcase bytes as an artifact;
-- a cryptographic hash of the testcase;
-- target and source revision;
-- build and harness identity;
-- campaign identifier and relevant options;
-- sanitizer type and diagnostic text, when available;
-- observed signal/exit status and timestamps.
+Start with a simple AFL++ mode. Consider parallel workers, dictionaries, corpus minimization and persistent mode only when a use case and correctness test justify them. Persistent mode requires reliable state reset; speed alone is not sufficient.
 
-Keep large binary inputs in a filesystem artifact store. Keep searchable metadata and artifact references in SQLite. Do not modify the original testcase during minimisation; store minimized inputs as additional derived artifacts linked to the original.
+### 3.7 Evidence collector and artifact store
 
-### 3.7 Crash grouping and triage
+For every observed crash:
+- preserve the original bytes unchanged;
+- calculate SHA-256;
+- record target revision, build profile, harness identity and campaign;
+- save sanitizer output, signal/exit status and timestamp where available;
+- retain the source path or artifact identifier.
 
-Grouping may use sanitizer category, signal and normalized stack frames. It is heuristic, not proof that two crashes have the same root cause. Retain raw artifacts and allow a reviewer to split or merge groups.
+Large testcases, minimized derivatives and logs belong in a controlled filesystem artifact store. SQLite stores searchable metadata, hashes and references. Minimized inputs are separate derived artifacts linked to their original.
 
-Use explicit states such as observed, reproduced, triaged, confirmed defect and security-relevant vulnerability. Stronger states require human review.
+### 3.8 Reproduction and minimization
 
-### 3.8 Reproduction service
+Replay an artifact against the exact recorded build when possible. Store command, environment, result, exit status and diagnostic output. Record one of reproduced, not reproduced or inconclusive.
 
-Replay a saved input against the matching recorded build and harness where possible. Record the exact command/environment, result, exit status, diagnostic output and whether reproduction succeeded, failed or was inconclusive.
+Minimization may use AFL++ tooling after a failure can be reproduced. Never replace the original input with the minimized one.
 
-A non-reproducing result is not by itself proof of a false positive or a fix.
+### 3.9 Crash grouping and triage
 
-### 3.9 Version comparison service
+Create candidate signatures from evidence such as sanitizer category, signal and normalized stack frames. Treat these signatures as heuristics: different bugs can share stack shapes, and one bug can produce different stacks across builds. Keep raw artifacts and reviewer override ability.
 
-Compare signatures from campaigns associated with explicitly recorded target revisions. Report:
-- **Newly observed:** present in the newer campaign and not observed in the earlier campaign.
-- **Persistent:** observed in both campaigns.
-- **Not re-observed:** observed earlier but absent from the newer campaign.
+A finding's status is advanced only through evidence and human review.
 
-Do not equate not re-observed with fixed. Fuzzing is finite and non-deterministic; differences in build flags, corpus, duration and coverage can affect observations. Show relevant configuration differences.
+### 3.10 Version-aware comparison
 
-### 3.10 Persistence layer
+This is a primary KEKKAI capability.
 
-SQLite is planned for relational metadata. Core conceptual records include targets, target versions, adapters/build configurations, campaigns, crash artifacts, crash groups/findings, reproduction attempts, version comparisons, reports and (if approved) AI analysis records.
+For each prior finding:
+1. Identify the exact source revisions and their recorded build/harness configurations.
+2. Replay the original saved testcase against each available version.
+3. Collect sanitizer category, signal, normalized stack and reproduction results.
+4. Compare evidence while exposing configuration differences.
+5. Record the result as newly observed, persistent or not re-observed, with uncertainty where matching is ambiguous.
 
-Use migrations or a controlled schema version from the beginning. Large testcase files and full campaign output should remain outside the database, with paths, hashes and metadata stored in SQLite.
+Do not treat raw AFL++ edge-map IDs as stable identifiers across different builds. Do not infer “fixed” from absence in a finite campaign. A changed stack or symbol location may require manual mapping.
 
-### 3.11 Reporting and local dashboard
+### 3.11 Persistence layer
 
-A Flask application is planned after the core workflow is verified. Start with read-only views: target and campaign summaries, crash evidence, reproduction history and version comparisons. Later actions may start or stop campaigns only through validated service methods and explicit limits.
+SQLite stores targets, versions, adapter/build profiles, harness records, campaigns, artifact metadata, crash groups/findings, reproduction attempts, version comparisons and reports. Use controlled schema versions/migrations. Store binary inputs and large logs outside SQLite.
 
-### 3.12 Optional AI analysis service
+Add persistence when the first stable evidence records are defined; do not build a complicated database before the first target proof of work.
 
-If approved, an AI service may accept a carefully selected bundle of sanitizer output, stack trace, target version and relevant source excerpt. It may return a plain-language explanation, possible root-cause hypotheses, manual investigation steps and a structured report draft.
+### 3.12 Reporting and dashboard
 
-AI output must include uncertainty and evidence references. It must never be treated as proof, must not automatically alter finding status, and must not be a dependency of the core engine. External transmission of source code, crash inputs or logs must be disabled by default and require explicit configuration and authorization. Credentials, if used, belong only in server-side secret configuration.
+Generate evidence-linked reports from stored records. Add Flask only after the engine and core data model are stable. The first dashboard should be read-only. Any later campaign controls must call validated service methods and enforce explicit limits; Flask routes must never expose arbitrary shell commands or unrestricted filesystem access.
 
-## 4. Target adapter lifecycle
+### 3.13 Optional AI explanation
 
-1. Register the target and record its source revision.
-2. Validate dependencies and source/build paths.
-3. Configure a reviewed harness and a small seed corpus.
-4. Build a clean instrumented target.
-5. Run a short smoke test with known-valid and malformed inputs.
-6. Start a bounded AFL++ campaign.
-7. Ingest and preserve output artifacts.
-8. Replay selected crashes against the recorded build.
-9. Review and label observations conservatively.
+If approved, pass only selected evidence such as sanitizer output, stack trace, target version and a relevant source excerpt. AI may explain terminology, suggest root-cause hypotheses and propose manual checks. It must cite the evidence it used and label uncertainty.
 
-A target should not be marked supported until this path is tested and documented.
+AI cannot verify a vulnerability, decide novelty, set a factual severity, or change finding state. External transfer of source code, crashes or logs is disabled by default. The core workflow must function with AI disabled.
 
-## 5. Data and artifact handling
+## 4. Core data model (conceptual)
 
-- Use stable identifiers for targets, versions, campaigns and findings.
-- Hash input artifacts so identical bytes can be recognised.
-- Preserve original crash files; derived/minimized files are separate artifacts.
-- Store paths relative to a controlled artifact root where practical.
-- Validate paths before file access and do not trust filenames emitted by external tools.
-- Record tool versions and campaign settings to support reproduction.
-- Avoid storing secrets or unrelated personal data in logs and crash metadata.
+- **Target:** project/library identity.
+- **TargetVersion:** exact source revision and provenance.
+- **BuildProfile:** compiler/tool versions, flags, sanitizer and instrumentation options.
+- **Harness:** source/binary identity and validation result.
+- **Campaign:** target version, build, harness, corpus, arguments, limits, timestamps and outcome.
+- **Artifact:** original or derived input/log, hash, type and storage reference.
+- **FindingGroup:** heuristic grouping of one or more observations.
+- **ReproductionAttempt:** artifact, build, command and result.
+- **VersionComparison:** compared versions, replay evidence, label and confidence/notes.
+- **Report:** a generated view of recorded evidence.
 
-## 6. Security and operational boundaries
+The schema should be implemented only when the fields have a demonstrated use. Prefer migrations and explicit identifiers.
 
-- Initial operation is local and limited to targets the user owns or is authorized to test.
-- Treat source archives, parser inputs, crash files, logs and AI responses as untrusted data.
-- Execute fuzz targets with time, memory and process limits appropriate to the host.
-- Do not run target processes with unnecessary privileges; never use `sudo` for fuzzing campaigns.
-- Do not expose raw process execution or arbitrary file paths through Flask routes.
-- Use safe subprocess argument handling and validate every adapter-defined executable/path.
-- Keep credentials out of Git and browser code.
-- Do not transmit source files or crash evidence to external AI services by default.
-- WSL 2 is a development environment, not a security sandbox. Use an appropriately isolated VM for samples or reproduction workflows that could endanger the Windows host.
+## 5. Security and operational boundaries
 
-## 7. Proposed implementation boundaries
+- Run only authorized local targets.
+- Do not run fuzz targets as root.
+- Bound time, memory and process count.
+- Treat target source, archives, inputs, logs and AI responses as untrusted data.
+- Validate every path and executable configured by an adapter.
+- Keep process invocation out of direct web request handlers.
+- Keep credentials and generated crash artifacts out of Git.
+- Do not transmit source, testcases or logs to an external model by default.
+- WSL 2 is a development workspace, not a security sandbox. Use a properly isolated VM for risky samples.
 
-Implement in this order:
-1. one reproducible target build and harness;
-2. AFL++ campaign execution and sanitizer evidence;
-3. crash artifact storage and reproduction;
-4. grouping and version comparison;
-5. SQLite-backed orchestration and reporting;
-6. Flask dashboard;
-7. optional integrations such as CASR and AI assistance.
+## 6. Implementation boundary
 
-Introduce interfaces where a real second implementation or test need justifies them. Avoid premature abstraction and unused modules added merely to match a planned folder tree.
+The first milestone is one target, one meaningful harness, one instrumented build and one bounded campaign. Do not build the dashboard, broad source analyser, automatic harness generator, distributed system or AI service before this path works.
+
+Create abstractions only when they reduce actual duplication or make a tested responsibility clearer.

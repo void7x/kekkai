@@ -3,138 +3,143 @@
 ## 1. Project identity
 
 **Name:** KEKKAI  
-**Full title:** Modular C/C++ Vulnerability Discovery and Analysis Platform  
-**Project type:** Local-first software security research and engineering project.
+**Full title:** Evidence-Driven C/C++ Vulnerability Discovery and Analysis Platform  
+**Type:** Local-first native software security research and engineering project.
 
-KEKKAI is intended to help users discover, reproduce and investigate potential defects in selected native C/C++ software components that process untrusted or structured input. It combines target-specific fuzzing setup, coverage-guided fuzzing, runtime diagnostics, crash evidence management and cross-version comparison.
+KEKKAI helps investigate potential defects in selected C/C++ software that processes untrusted or structured input. It organizes target setup, harness validation, coverage-guided fuzzing, crash evidence, reproduction and cross-version comparison.
 
-The word **zero-day** in the academic project title describes the research motivation. The platform cannot establish that a defect is unknown to the vendor or the wider community, and it cannot guarantee that a zero-day will be discovered.
+The original academic motivation concerns zero-day vulnerability discovery. KEKKAI cannot guarantee a zero-day discovery or prove novelty merely because a fuzzer reports a crash.
+
+The locked technical direction and workflow are defined in [Workflow and Technology Decisions](WORKFLOW_DECISIONS.md).
 
 ## 2. Problem statement
 
-Testing input-processing native software is difficult because malformed or unexpected inputs can reach complex parsing paths. Manual testing and isolated command-line tools can produce useful evidence, but researchers still need to configure builds and harnesses, manage fuzzing campaigns, preserve crashes, reproduce failures, distinguish duplicate reports and compare behavior across versions.
+Native parsers and other input-processing components can contain defects that are difficult to expose with ordinary tests. Researchers must configure builds and harnesses, run fuzzing campaigns, preserve crash inputs, reproduce failures, distinguish likely duplicates and understand whether an observation also occurs in other software versions.
 
-KEKKAI aims to organise those activities into a repeatable workflow for a deliberately limited set of supported C/C++ targets.
+KEKKAI aims to make this work repeatable and evidence-driven for a carefully selected set of supported targets.
 
 ## 3. Aim
 
-To design and implement a modular platform that orchestrates local fuzz testing of selected C/C++ parser libraries and helps analyse, validate, record and compare potential defects using reproducible evidence.
+Design and implement a modular local platform that orchestrates fuzz testing of selected native C/C++ components and supports evidence collection, crash investigation and version-aware comparison.
 
 ## 4. Objectives
 
-1. Define a target-adapter approach for supported native C/C++ components.
-2. Record target identity, source version and build configuration for each experiment.
-3. Prepare or configure an appropriate fuzzing harness and initial seed corpus.
-4. Build targets with compatible fuzzing instrumentation and runtime diagnostics.
-5. Orchestrate bounded AFL++ coverage-guided campaigns.
-6. Preserve crash inputs and diagnostic output as traceable evidence.
-7. Group likely duplicate crashes without deleting original evidence.
-8. Replay saved inputs to assess reproducibility.
-9. Compare finding signatures between recorded target versions without treating a missing observation as proof of a fix.
-10. Present campaign and finding records through local reports and, in a later phase, a Flask dashboard.
+1. Establish a reproducible Ubuntu/WSL2 toolchain for native fuzzing.
+2. Build and validate one meaningful harness for a selected parser library.
+3. Run bounded AFL++ campaigns with compatible ASan/UBSan diagnostics.
+4. Preserve original crash artifacts and experiment provenance.
+5. Replay, minimize and group crashes without losing original evidence.
+6. Compare finding observations across explicitly recorded software versions.
+7. Store metadata in SQLite and large artifacts on disk.
+8. Add source inspection, reports and a local dashboard after the core works.
+9. Evaluate optional AI assistance without making it a core dependency.
+10. Evaluate the implementation against controlled test cases and, where compatible, an established benchmark.
 
-## 5. Initial target scope
+## 5. Target scope
 
-### 5.1 Candidate pilot
+### 5.1 Pilot target
 
-**libpng** is the proposed first target because it is a native C library that processes structured image input. It is a candidate, not yet a validated integration.
+**libpng is the first candidate, conditional on feasibility.**
 
-Before committing to a full campaign, the team must:
-- verify that the selected source release or commit can be built in the chosen Ubuntu environment;
-- identify an appropriate public parsing entry point and a suitable harness strategy;
-- record the exact source revision and build options;
-- confirm that the selected build can be instrumented with the intended AFL++ and sanitizer toolchain.
+It is a C library that processes structured image input. Before treating it as supported, we must pin an exact source revision, build it cleanly, identify a meaningful parsing path, validate a harness, and prove AFL++ instrumentation and sanitizer diagnostics work.
 
-The exact libpng release or commit must be pinned in target configuration and recorded with each campaign. Do not assume that an upstream-provided harness, corpus or result is original KEKKAI work.
+If these checks fail, document the reason and evaluate one alternative target. Do not claim arbitrary C/C++ target support.
 
-### 5.2 Extensibility
+### 5.2 Future target scope
 
-The design should allow future adapters for other selected C/C++ libraries that process structured or externally supplied data (for example, archive, document or image parsers). Additional targets are future work and must not be described as supported until their adapters and test workflows pass.
+Future adapters may support other native image, archive, document or structured-data parsers. Each target requires its own build profile, harness, seeds and acceptance checks. Additional targets are not part of the first proof of work.
 
-### 5.3 Initial constraints
+### 5.3 Boundaries
 
-- Initial campaigns run locally in a controlled Ubuntu/WSL2 development environment.
-- Target selection and adapter configuration are explicit; the MVP does not promise automatic support for arbitrary source trees.
-- A custom harness or build configuration may be required for each target.
-- Fuzzing duration, memory and CPU use must be bounded.
-- Source inspection with Clang tooling/libclang may assist investigation, but it does not automatically identify a correct harness or prove a defect.
+- Local, authorized testing only.
+- Native C/C++ target code and harnesses.
+- Explicit, reviewed target adapters.
+- Bounded fuzzing campaigns.
+- No web/network scanning.
+- No automatic exploitation.
+- No automatic vulnerability or novelty verdict.
 
-## 6. Functional scope
+## 6. Functional requirements
 
-### F-01 — Target registration and provenance
-The system should record a target name, local source location, exact version or commit, adapter identifier and relevant build details.
+### FR-01 — Target registration
+Record a target identifier, source location, exact source revision, adapter identity and relevant build settings.
 
-### F-02 — Target adapter
-A supported target should have an explicit adapter configuration describing its build steps, harness, seed corpus, optional dictionary, instrumentation options and execution constraints.
+### FR-02 — Target adapter
+Describe the build steps, harness, seed corpus, optional dictionary, instrumentation and execution constraints for each supported target.
 
-### F-03 — Instrumented build
-The build workflow should record compiler/toolchain versions and options. It should fail clearly when required dependencies or instrumentation are unavailable.
+### FR-03 — Harness/build validation
+Confirm clean compilation, intended library-code reachability, expected behavior for representative inputs, useful instrumentation feedback and configured resource limits before a campaign is accepted.
 
-### F-04 — Fuzz campaign orchestration
-The platform should invoke AFL++ for a configured local target using structured process arguments, a known working directory and explicit time/resource limits. Campaign configuration and logs should be retained.
+### FR-04 — Campaign orchestration
+Run AFL++ using validated arguments, controlled working directories and explicit time/resource limits. Preserve logs, exit state, tool versions and campaign configuration.
 
-### F-05 — Evidence collection
-For each observed crash, preserve the original test case and relevant metadata, including target revision, campaign, harness/build identity, diagnostic output and timestamp. Large binary artifacts should be stored on disk, with their paths and hashes recorded in the database.
+### FR-05 — Evidence collection
+Preserve each original crash testcase and record its SHA-256, target revision, build/harness identity, campaign, diagnostic output, signal/exit status and time. Keep large artifacts on disk and metadata in SQLite.
 
-### F-06 — Crash grouping
-The system may group likely duplicates using reproducible signatures such as sanitizer type and normalized stack information. Grouping is heuristic: it must not discard raw evidence, and ambiguous cases must remain reviewable.
+### FR-06 — Grouping and minimization
+Create heuristic crash groups and minimized derivatives where useful. Never overwrite or discard the original testcase. Keep uncertain grouping decisions reviewable.
 
-### F-07 — Reproduction and triage
-A saved test case should be replayable against its recorded build when possible. The system should record whether a crash reproduced, did not reproduce or could not be tested. A crash is not automatically a confirmed vulnerability.
+### FR-07 — Reproduction
+Replay saved inputs against the recorded build where possible. Record reproduced, not reproduced or inconclusive, including commands and results.
 
-### F-08 — Version comparison
-The system should compare finding signatures across explicitly recorded versions:
-- **Newly observed:** present in the newer campaign and not observed in the earlier campaign.
-- **Persistent:** observed in both campaigns.
-- **Not re-observed:** observed earlier but absent from the newer campaign.
+### FR-08 — Version-aware comparison
+Replay prior finding inputs against explicitly recorded versions and compare diagnostic evidence. Use “newly observed”, “persistent” and “not re-observed”. A missing later observation is not proof of a fix.
 
-“Not re-observed” must not be presented as “fixed” without independent validation. Fuzzing is finite and non-deterministic.
+### FR-09 — Source inspection
+Use Clang tooling/libclang later to help locate and rank candidate input-processing functions. This is a source-understanding aid, not an automatic vulnerability detector or substitute for a reviewed harness.
 
-### F-09 — Reports and dashboard
-The system should produce a technical summary of targets, campaigns, observed crashes, reproduction state and version comparisons. A local Flask dashboard is planned after the core engine is validated.
+### FR-10 — Persistence and reporting
+Store structured experiment and finding metadata in SQLite, link to filesystem artifacts, and produce evidence-linked reports.
 
-### F-10 — Optional AI assistance
-An optional AI service may summarise selected sanitizer output, stack traces and source context, and suggest investigation steps. This enhancement is proposed and subject to project-guide approval. AI output must be marked as an unverified hypothesis, must not independently mark a finding as a vulnerability, and must not be required for the core workflow.
+### FR-11 — Local dashboard
+Add a Flask dashboard after the engine and evidence model are stable. Start with read-only views; do not expose arbitrary command execution.
 
-## 7. Finding terminology and lifecycle
+### FR-12 — Optional AI explanation
+If approved, allow an AI service to summarize selected sanitizer reports, stack traces and source excerpts and suggest manual investigation steps. AI results are unverified hypotheses and cannot change finding status or assert a vulnerability. External transmission is disabled by default.
 
-KEKKAI should use conservative statuses:
+## 7. Finding lifecycle
 
 1. **Observed crash:** a tool reported an abnormal termination or sanitizer finding.
-2. **Reproduced crash:** the saved input triggered the recorded failure again under a documented setup.
-3. **Triaged candidate:** evidence has been reviewed and a plausible defect mechanism is identified.
-4. **Confirmed defect:** the underlying software defect has been independently established.
-5. **Security-relevant vulnerability:** evidence supports a security impact under a stated threat model.
+2. **Reproduced crash:** saved input triggered the failure again under a documented setup.
+3. **Triaged candidate:** a reviewer identified a plausible defect mechanism.
+4. **Confirmed defect:** the underlying defect was independently established.
+5. **Security-relevant vulnerability:** security impact is supported under a stated threat model.
 
-The system must not automatically promote a crash to a confirmed defect or vulnerability. Novelty and security impact require investigation beyond the fact that a fuzzer found a crash.
+A crash, unique crash group, confirmed defect and security vulnerability are not interchangeable.
 
-## 8. Explicit non-goals
+## 8. Non-functional requirements
 
-The initial project is not intended to:
+- **Reproducibility:** capture exact source, compiler, instrumentation, harness, corpus and campaign configuration.
+- **Traceability:** link every finding to its target, version, campaign and original input.
+- **Evidence preservation:** originals remain immutable; derived artifacts remain linked.
+- **Modularity:** target-specific logic stays in adapters.
+- **Reliability:** failed, timed-out and interrupted runs are reported distinctly.
+- **Resource control:** support campaign time and memory limits.
+- **Local-first operation:** core functionality requires no cloud service or AI model.
+- **Security:** no unnecessary privileges, arbitrary dashboard shell execution or external data transfer by default.
+
+## 9. Evaluation
+
+Evaluate in separate categories:
+
+- controlled programs with known injected defects;
+- a compatible and documented benchmark such as Magma;
+- any independently validated defect discovered during research.
+
+Possible measurements include build/harness success, campaign execution, coverage observations, reproduction rate, evidence completeness, duplicate-group usefulness and version-comparison correctness. A benchmark rediscovery must not be reported as a new zero-day.
+
+## 10. Explicit non-goals
+
+KEKKAI will not initially:
 - scan websites or remote networks;
-- fuzz arbitrary software without a reviewed target adapter;
-- automatically exploit crashes or generate weaponised payloads;
-- guarantee discovery of all defects or any zero-day;
-- claim that a crash is a vulnerability without triage;
-- declare a defect fixed solely because a later campaign did not reproduce it;
-- require an external AI service for core functionality.
+- promise support for arbitrary software;
+- automatically exploit crashes;
+- guarantee a zero-day discovery;
+- label a crash as a vulnerability without triage;
+- declare a bug fixed solely because it was not re-observed;
+- depend on external AI for core functionality;
+- introduce a distributed service architecture without a measured need.
 
-## 9. Non-functional requirements
+## 11. Current status
 
-- **Reproducibility:** record source revision, build configuration, tool versions, harness identity, corpus identity and campaign options.
-- **Traceability:** each finding should link back to its target, version, campaign and original input evidence.
-- **Modularity:** target-specific build and harness details should remain in adapters rather than being hard-coded throughout the platform.
-- **Reliability:** campaign failures and interrupted runs should be represented explicitly, not silently treated as successful.
-- **Resource control:** campaigns must support timeouts and memory/CPU limits appropriate to the environment.
-- **Local-first operation:** the core workflow should work without an external AI API or cloud service.
-- **Security:** do not expose arbitrary command execution through the dashboard; protect secrets and treat test inputs and logs as untrusted data.
-
-## 10. Evaluation approach
-
-Evaluation should use controlled demonstration programs with known defects and, where compatible with the chosen toolchain and licensing, an established fuzzing benchmark such as Magma. Measurements may include campaign duration, coverage observations, unique crash groups, reproduction rate, triage usefulness and version-comparison correctness.
-
-Benchmark results, controlled-test results and newly discovered defects must be reported separately. A benchmark rediscovery is not a new zero-day discovery.
-
-## 11. Project status
-
-At repository initialization, KEKKAI is at the documentation and environment-setup stage. No fuzzing engine, target adapter, database, dashboard or AI service is claimed as implemented. Each capability will be marked complete only after implementation and verification.
+The repository is at the documentation and environment-verification stage. The core native toolchain has been verified through AFL++ instrumentation, coverage-feedback and ASan/UBSan smoke tests in Ubuntu on WSL 2. Real target integration, libclang runtime compatibility, and a sustained fuzzing campaign remain unverified. No application engine, target adapter, campaign manager, database or dashboard is currently claimed as implemented.
