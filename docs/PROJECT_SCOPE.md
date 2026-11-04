@@ -142,4 +142,4 @@ KEKKAI will not initially:
 
 ## 11. Current status
 
-The repository is at the documentation and environment-verification stage. The toolchain still needs a verified Clang/LLVM and AFL++ setup. No application engine, target adapter, campaign manager, database or dashboard is currently claimed as implemented.
+The repository is at the documentation and environment-verification stage. The core native toolchain has been verified through AFL++ instrumentation, coverage-feedback and ASan/UBSan smoke tests in Ubuntu on WSL 2. Real target integration, libclang runtime compatibility, and a sustained fuzzing campaign remain unverified. No application engine, target adapter, campaign manager, database or dashboard is currently claimed as implemented.
