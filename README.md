@@ -120,3 +120,4 @@ A fuzzer crash is an observation, not automatically a defect or security vulnera
 - [Project Scope](docs/PROJECT_SCOPE.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Development Plan](docs/DEVELOPMENT_PLAN.md)
+- [Development Environment Snapshot](docs/ENVIRONMENT.md)
