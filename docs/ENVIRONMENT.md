@@ -2,9 +2,9 @@
 
 **Checked:** 2026-11-04  
 **Environment:** Ubuntu 26.04.1 LTS on WSL 2  
-**Status:** Core AFL++ instrumentation, coverage feedback, and ASan/UBSan smoke tests passed. Some supporting development packages remain unverified.
+**Status:** Core native development toolchain verified. AFL++ instrumentation, coverage feedback, and ASan/UBSan smoke tests passed.
 
-This file records observed environment state. It distinguishes installed tools from capabilities that have actually been exercised.
+This file records observed environment state and distinguishes installed tools from capabilities that have actually been exercised.
 
 ## System
 
@@ -20,16 +20,23 @@ This file records observed environment state. It distinguishes installed tools f
 |---|---|
 | Git | 2.53.0 |
 | Python | 3.14.4 |
+| Python venv | Available; `python3 -m venv --help` passed |
+| pip | 25.1.1 |
 | GCC | 15.2.0 |
 | CMake | 4.2.3 |
+| Ninja | 1.13.2 |
+| pkg-config | 2.5.1 |
 | SQLite CLI | 3.46.1 |
+| zlib development files | 1.3.1, reported by pkg-config |
 | Clang | Ubuntu Clang 21.1.8 |
 | Clang++ | Ubuntu Clang 21.1.8 |
 | llvm-config | 21.1.8 |
 | libclang-dev | Installed; APT package version 21.1.6-71 |
-| AFL++ | 4.33c, observed in compiler-wrapper banner |
+| AFL++ | 4.33c, observed in compiler-wrapper and fuzzer banners |
 | `afl-clang-fast` | Available at `/usr/bin/afl-clang-fast` |
 | `afl-clang-lto` | Available at `/usr/bin/afl-clang-lto` |
+
+**AFL++ version-command note:** `afl-fuzz -V` expects a duration in seconds, not a version-only flag. The command printed the AFL++ 4.33c banner and then displayed usage because no duration was supplied. This was not an installation failure.
 
 ## Smoke-test evidence
 
@@ -44,16 +51,13 @@ A small C program that reads standard input was used to test the native toolchai
 
 This verifies that the selected AFL++ compiler wrapper can instrument and build a small target, that AFL++ can collect execution feedback from it, and that the Clang sanitizer build runs in this environment. It does not yet validate a real third-party library, a KEKKAI harness, or a sustained fuzzing campaign.
 
-## Still to verify
+## Remaining target-specific work
 
-| Component | State |
+| Item | State |
 |---|---|
-| Python venv/pip support | Not yet independently verified |
-| Ninja | Not yet independently verified |
-| pkg-config | Not yet independently verified |
-| zlib development headers | Not yet independently verified |
-| libclang runtime package details | Not independently recorded |
 | Real target build and harness | Not started |
+| libclang runtime/package compatibility in a real integration | Not yet exercised |
+| Sustained fuzzing campaign | Not started |
 
 ## Next engineering milestone
 
