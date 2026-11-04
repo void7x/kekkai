@@ -1,96 +1,122 @@
 # KEKKAI
 
-**Kekkai — Modular C/C++ Vulnerability Discovery and Analysis Platform**
+**KEKKAI — Evidence-Driven C/C++ Vulnerability Discovery and Analysis Platform**
 
-Kekkai is a planned, local-first research platform for discovering and investigating potential defects in selected native C/C++ software components that process untrusted or structured input.
+KEKKAI is a local-first research platform for discovering, reproducing and investigating potential defects in selected native C/C++ software that processes untrusted or structured input.
 
-The initial work will focus on establishing a reproducible fuzzing workflow for one supported parser library, then building the platform around that verified workflow. The first candidate target is **libpng**, subject to build and harness feasibility checks. Its exact source release or commit will be pinned and recorded before a campaign is treated as an experiment.
+Its defining capability is **evidence-driven, version-aware investigation**: a crash is preserved with the exact experiment that produced it, replayed for confirmation, and checked against other recorded software versions. KEKKAI reports what the evidence supports; it does not turn every crash into a claimed vulnerability.
 
-> **Project status:** Initial repository and project documentation only. The fuzzing engine, adapters, database, dashboard and AI-assisted analysis are planned; they are not implemented yet.
+> **Current status:** Documentation and development-environment setup. No fuzzing engine, target adapter, database, dashboard or AI integration is claimed as implemented.
 
-## What Kekkai is intended to do
+## Locked project direction
 
-1. Register a supported local C/C++ target and record its exact source version.
-2. Configure a target-specific build, fuzzing harness and initial seed corpus.
-3. Build the target with suitable fuzzing instrumentation and runtime diagnostics.
-4. Run bounded, coverage-guided fuzzing with AFL++.
-5. preserve crash inputs and diagnostic evidence, group likely duplicates, and replay findings.
-6. Compare observed finding signatures across recorded software versions.
-7. Present campaign and finding information through a local dashboard and reports.
+The engineering workflow is recorded in [Workflow and Technology Decisions](docs/WORKFLOW_DECISIONS.md). That document is the project source of truth for scope, architecture, technology choices and implementation order. Changes to those decisions require a documented reason and review.
 
-The initial supported scope is deliberately narrow. The architecture should allow additional target adapters later, but Kekkai will not claim support for arbitrary C/C++ software until each adapter has been implemented and tested.
+### Initial target
 
-## Important terminology
+The first proof of work will use **libpng**, provided the selected release can be built and instrumented reliably and a meaningful harness can be validated. Before a campaign, we will pin its exact source release or commit. If feasibility checks fail, we will document the blocker and evaluate one alternative rather than pretending support works.
 
-A fuzzer-reported crash is an **observation**, not automatically a vulnerability. A finding must be reproduced and triaged before stronger conclusions are made. The project can help investigate potential previously unknown defects; it cannot guarantee discovery of a zero-day or prove that a defect was previously unknown.
+### Core workflow
 
-## Planned technology
+1. Register a supported target and pin its source revision.
+2. Prepare a target-specific build, reviewed fuzz harness and seed corpus.
+3. Validate the harness and instrumented build with smoke tests.
+4. Run a bounded AFL++ coverage-guided fuzzing campaign with compatible ASan/UBSan diagnostics.
+5. Preserve every original crash input and its provenance; group likely duplicates without discarding evidence.
+6. Replay and, where useful, minimize saved inputs while retaining the original artifact.
+7. Compare prior finding inputs and signatures across explicitly recorded target versions.
+8. Store experiment metadata in SQLite and large artifacts on disk; produce reports.
+9. Add the local dashboard only after the core workflow works.
+10. Evaluate optional AI-assisted explanations only after the evidence pipeline is reliable and the privacy/approval requirements are settled.
 
-| Area | Planned technology |
+### Version-comparison language
+
+KEKKAI will use conservative labels:
+
+- **Newly observed** — observed in the later experiment but not in the earlier recorded experiment.
+- **Persistent** — observed in both.
+- **Not re-observed** — observed earlier but not seen in the later experiment.
+
+“Not re-observed” does not mean “fixed”. Fuzzing is finite and non-deterministic; configuration differences and changed execution paths can affect results.
+
+## Technology decisions
+
+| Area | Decision |
 |---|---|
-| Platform orchestration | Python |
-| Native target compilation | Clang/LLVM and, where useful, GCC |
-| Coverage-guided fuzzing | AFL++ |
+| Orchestration and platform logic | Python |
+| Native target and harness code | C/C++ |
+| Compiler and source tooling | Clang/LLVM; libclang/Clang tooling for later source inspection |
+| Coverage-guided fuzzer | AFL++ |
 | Runtime diagnostics | AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan), where compatible |
-| C/C++ source inspection | Clang tooling / libclang, as a supporting aid |
-| Local metadata store | SQLite |
-| Local dashboard (later phase) | Flask, HTML, CSS, Bootstrap and JavaScript |
-| Optional crash analysis | CASR, after compatibility checks |
-| Evaluation | Controlled test programs and a compatible benchmark such as Magma |
-| Version control | Git and GitHub |
+| Metadata | SQLite |
+| Large crash and campaign artifacts | Filesystem artifact store with hashes and database references |
+| Dashboard, after core validation | Flask with HTML/CSS/JavaScript |
+| Optional crash triage helper | CASR, after compatibility review |
+| Evaluation | Controlled known-defect programs and a compatible benchmark such as Magma |
+| Optional AI | Evidence summarization only; never required by the core workflow |
 
-Versions and build options will be recorded per target and campaign. The table is a plan, not a claim that these dependencies are already installed or integrated.
+We are **not** switching the whole project to Rust, introducing microservices, building the dashboard first, or depending on a local or external AI model for core functionality. A technology change requires measured need and review.
 
-## Planned repository layout
+## Development order
 
-The following is the intended layout as implementation grows; folders will be added when their modules are introduced.
+- **Phase 0:** Verify Ubuntu/WSL2 and the native fuzzing toolchain.
+- **Phase 1:** Build and fuzz the first target with a validated minimal harness.
+- **Phase 2:** Harden harness checks, target adapters and campaign orchestration.
+- **Phase 3:** Build crash evidence, reproduction, minimization, grouping and persistence.
+- **Phase 4:** Implement version-aware replay and comparison.
+- **Phase 5:** Add source inspection and additional target adapters only when justified.
+- **Phase 6:** Add a local reporting layer and Flask dashboard.
+- **Phase 7:** Evaluate optional AI assistance, benchmarks and final hardening.
 
-```text
+The acceptance checks for each phase are in [Development Plan](docs/DEVELOPMENT_PLAN.md).
+
+## Repository layout
+
+The repository will grow only as implementation needs each module. The planned shape is:
+
+~~~text
 kekkai/
-├── backend/
-│   └── app/                 # Flask application (later phase)
 ├── engine/
-│   ├── adapters/             # Target-specific configuration
-│   ├── harnesses/            # Native fuzzing harnesses
-│   ├── fuzzing/              # Campaign orchestration
-│   ├── crash_analysis/       # Evidence ingestion and triage
-│   └── regression/           # Cross-version comparison
+│   ├── adapters/
+│   ├── build/
+│   ├── harnesses/
+│   ├── fuzzing/
+│   ├── evidence/
+│   ├── triage/
+│   └── versioning/
 ├── targets/
-│   └── libpng/               # Initial candidate target adapter
+│   └── libpng/
+├── backend/             # later: Flask application
 ├── tests/
 ├── scripts/
-├── docs/
-├── README.md
-└── .gitignore
-```
+└── docs/
+~~~
 
-Large generated outputs, crash artifacts, local databases and secrets should stay out of Git. Small, curated seed files and reproducible test fixtures may be versioned when their provenance and licensing are clear.
+Do not create empty modules just to match this tree. Large generated campaigns, databases, crash artifacts and secrets stay out of Git.
 
 ## Development environment
 
-The planned development environment is Ubuntu on WSL 2. Keep the working repository in the Linux filesystem (for example, `/home/sahil/kekkai`) rather than under `/mnt/c` for Linux build and fuzzing workloads.
+Ubuntu on WSL 2 is the primary development environment. Keep the working repository in the Linux filesystem (for example, /home/sahil/kekkai) for native build and fuzzing workloads. Use a Python virtual environment for project packages. The precise package installation path depends on the Ubuntu release and available LLVM/AFL++ versions.
 
-The initial setup will use Ubuntu packages for system tools and a Python virtual environment for Python dependencies. Exact installation instructions will be added after the toolchain versions are checked.
+WSL 2 is a development environment, not a security sandbox. Do not run campaigns as root. Use a suitably isolated VM for experiments that could endanger the host.
 
 ## Git workflow
 
-- `main`: stable, reviewed project state.
-- `development`: integration branch for verified work.
-- `feature/<short-name>`: focused implementation branches.
+- **main:** stable, reviewed milestones.
+- **development:** integration branch.
+- **feature/<short-name>:** focused implementation branches created from development.
 
-Changes should be reviewed and tested before merging into `development`; only stable, verified milestones should be merged into `main`. Do not commit credentials, API keys, private data, unreviewed crash samples or large generated campaign output.
+Review and test feature work before integrating it into development; merge only stable milestones into main.
 
-## Responsible testing
+## Responsible research and limitations
 
-Use Kekkai only with software you own, software for which you have explicit authorization to test, or research benchmarks and demonstration targets whose terms permit testing. Initial campaigns are intended to run locally in a controlled environment with resource limits. Kekkai is not a remote web scanner, an exploit-generation tool, or a guarantee of security.
+Use KEKKAI only on software you own, software you are explicitly authorized to test, or research targets whose terms permit the work. Campaigns must have time and resource limits.
 
-## AI-assisted analysis (optional proposal)
-
-An optional AI analysis service may later summarize sanitizer reports, stack traces and selected source context to suggest investigation steps. It will not replace fuzzing, reproduction or human triage, and its output must be labelled as a hypothesis rather than a confirmed vulnerability. This enhancement is subject to project-guide approval and privacy review; the core fuzzing workflow must remain usable without an AI service. No source code or crash data should be sent to an external model unless that behavior is explicitly configured and authorized.
+A fuzzer crash is an observation, not automatically a defect or security vulnerability. Reproduction, technical triage, impact analysis and any novelty assessment require separate evidence. KEKKAI cannot guarantee discovery of a zero-day.
 
 ## Documentation
 
-- [Project scope](docs/PROJECT_SCOPE.md)
+- [Workflow and Technology Decisions](docs/WORKFLOW_DECISIONS.md)
+- [Project Scope](docs/PROJECT_SCOPE.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Development plan](docs/DEVELOPMENT_PLAN.md)
-
+- [Development Plan](docs/DEVELOPMENT_PLAN.md)
