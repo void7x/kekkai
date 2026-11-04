@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Native build products
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+core
+core.*
+
+# Local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.log
+
+# Generated campaign data and reports
+/artifacts/
+/campaigns/
+/data/runtime/
+/findings/
+/fuzz-out/
+/afl-out/
+/reports/generated/
+
+# Target-specific generated outputs (curated seed corpora may be committed)
+/targets/**/build/
+/targets/**/output/
+/targets/**/runtime/
