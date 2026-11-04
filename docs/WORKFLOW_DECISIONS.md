@@ -159,8 +159,21 @@ Never silently reuse stale build products between materially different configura
 - **Project owner:** approves scope, target selection and material changes; runs commands and shares test output.
 - **Architecture/review lead (assistant):** maintains this decision baseline, researches design choices, reviews agent output, defines acceptance tests and verifies claims.
 - **Implementation agent:** implements the approved, bounded engineering task. It must not silently replace the stack, widen scope, claim tests it did not run or commit/push changes outside the agreed workflow.
+- **Independent review/research agent:** may work in parallel on a clearly separated research or review assignment (for example, checking API contracts, build assumptions, threat/risk areas or upstream documentation). It must return findings and evidence only; it is not a second implementation owner for the active task.
 
-Use one implementation owner per task. Review a completed slice before starting another major feature.
+### Independent review-agent access and restrictions
+
+A review-only agent must have **read-only access** to project material. Do not grant it repository write permission merely to make research convenient.
+
+- This repository is public, so an independent reviewer can normally inspect the required branch and task documents through public GitHub URLs without being added as a collaborator or connected with a write-capable GitHub account.
+- If an external agent platform offers only a combined read/write repository permission, do **not** connect or authorize it with that permission for a review-only assignment. Share public links, pasted source excerpts or exported task material instead.
+- If write access has already been granted to an agent that is only supposed to review, revoke or reduce that access before proceeding. Do not rely on prompt wording as a substitute for an access-control boundary.
+- The review prompt must explicitly prohibit implementation and all repository mutations, including editing or creating code, tests, configuration or documentation; creating, deleting or switching branches; committing, pushing, merging, opening or changing pull requests; changing issues, CI settings, permissions or repository settings; and accessing or copying secrets.
+- Ask the reviewer to distinguish verified facts from assumptions, cite the exact source/version inspected, identify critical blockers separately from optional suggestions, and make no changes.
+- Keep review outputs separate from the implementation workspace. The implementation owner and project owner evaluate recommendations before any approved change is made.
+- If an agent unexpectedly changes repository state, stop the task. Inspect the branch, commits and complete diff before taking any recovery action; do not automatically merge, reset or overwrite work.
+
+Use one implementation owner per task. Independent agents may research or review in parallel only when they have no write access and do not modify the implementation workspace. Review a completed implementation slice before starting another major feature.
 
 ## 9. Git workflow
 
@@ -222,6 +235,7 @@ Use separate clean build directories for materially different source revisions, 
 ### 11.4 Implement in small, reviewable slices
 
 - One implementation owner works on a task at a time. Do not have multiple agents edit the same files or implement overlapping designs in parallel.
+- Independent agents may research or review in parallel only under the read-only access rules in Section 8. A prompt saying "do not modify" is not a permission boundary; do not give a review-only agent write-capable repository access.
 - Give an implementation agent the approved goal, scope, constraints, acceptance checks and required report format. It may not silently change architecture, dependencies, public interfaces or project scope.
 - The implementation agent must not commit or push unless the project owner explicitly authorizes that action. It must report changed files, important design choices, commands actually run, test results, known limitations and unfinished work.
 - Make the smallest vertical slice that can be built and exercised. Compile or run targeted checks after each meaningful slice rather than generating a large unverified change.
