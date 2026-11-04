@@ -173,3 +173,148 @@ Use one implementation owner per task. Review a completed slice before starting 
 ## 10. Change control
 
 The workflow is locked as the default plan. It may change only when a concrete technical constraint, test result, project-guide requirement or measured bottleneck justifies it. Record what changed, why, alternatives considered and which phases are affected before implementation adopts the change.
+
+## 11. Repeatable engineering workflow — every task
+
+This procedure applies to every code, test, documentation, build-system, database, dashboard and target-integration task. The phase plan says **what** we build; this section says **how** every change is made and verified. Follow it in order. Do not skip a gate just to move faster.
+
+### 11.1 Define and approve one bounded task
+
+Before editing files, write down:
+
+- **Goal:** one clear behavior or outcome.
+- **Reason:** the user problem or technical requirement it solves.
+- **Scope:** files/modules expected to change and what is explicitly out of scope.
+- **Dependencies and risks:** new packages, external source, platform assumptions, security impact and compatibility concerns.
+- **Acceptance checks:** observable conditions that will prove the task is complete.
+- **Verification plan:** exact build/test/manual checks that can realistically be run.
+- **Recovery plan:** how to revert or disable the change without losing user data or original evidence.
+
+Inspect the current code and documentation before proposing a new module or abstraction. Prefer the smallest complete change. Do not begin implementation while the intended behavior or acceptance criteria are materially ambiguous. Ask one focused question only when a decision cannot safely be inferred; otherwise state a conservative assumption and proceed.
+
+A task is not approved merely because an implementation agent says it is ready. The project owner approves its scope and any material trade-off.
+
+### 11.2 Research and design before implementation
+
+- Read the relevant source files, interfaces, tests, project decisions and applicable upstream documentation.
+- Verify version-sensitive claims against the actual pinned version, not only a blog post, search snippet or a different release.
+- For third-party source, record the official source URL, exact tag/commit, archive checksum or other available provenance, license and required dependencies before building it.
+- Sketch the data flow and interfaces affected. Identify error paths, resource ownership, cleanup, input limits and platform-specific behavior where relevant.
+- Reuse a current dependency or standard-library facility where suitable. Add a dependency only when a concrete requirement justifies it; record why and pin or constrain it appropriately.
+- Do not design speculative frameworks, plugin systems or generic abstractions for hypothetical future targets.
+
+If research disproves the proposed approach, stop before implementation and present the evidence and a smaller alternative.
+
+### 11.3 Establish an isolated Git checkpoint
+
+For code changes:
+
+1. Start from the latest `development` branch.
+2. Check `git status`, the current branch and the latest commit.
+3. Do not overwrite, discard, reset or silently stash existing user changes. Stop and inspect a dirty working tree first.
+4. Create one focused `feature/<short-name>` branch from the updated `development` branch.
+5. Keep unrelated tasks and formatting changes out of that branch.
+
+Documentation-only corrections to this source-of-truth workflow may be made on `development` when explicitly requested. Never develop on `main`. Generated build trees, virtual environments, downloaded third-party source, databases, campaign output, crash artifacts and secrets must stay outside tracked source unless a specific small fixture is intentionally approved.
+
+Use separate clean build directories for materially different source revisions, compilers, flags, sanitizers or instrumentation modes. Never trust stale binaries after changing build inputs.
+
+### 11.4 Implement in small, reviewable slices
+
+- One implementation owner works on a task at a time. Do not have multiple agents edit the same files or implement overlapping designs in parallel.
+- Give an implementation agent the approved goal, scope, constraints, acceptance checks and required report format. It may not silently change architecture, dependencies, public interfaces or project scope.
+- The implementation agent must not commit or push unless the project owner explicitly authorizes that action. It must report changed files, important design choices, commands actually run, test results, known limitations and unfinished work.
+- Make the smallest vertical slice that can be built and exercised. Compile or run targeted checks after each meaningful slice rather than generating a large unverified change.
+- Handle errors explicitly. Validate external input, paths and configuration; use safe process argument arrays rather than shell-concatenated commands; set time/resource limits for launched tools; clean up processes and temporary resources on failure.
+- Preserve compatibility deliberately. Do not make unrelated refactors, rename public interfaces or reformat entire files as part of a focused fix.
+- Do not suppress warnings, weaken tests, remove failing checks or broaden permissions merely to get a green result.
+
+If implementation reveals that the approved scope is insufficient, pause and propose the change with its reason and impact before expanding the task.
+
+### 11.5 Verify from narrow to broad
+
+Run checks in this order, using the checks that apply to the task:
+
+1. **Diff hygiene:** inspect changed files and run `git diff --check`.
+2. **Targeted check:** compile or test the exact module/behavior changed.
+3. **Regression check:** reproduce the reported defect or add a test that would fail before the fix and pass after it.
+4. **Boundary and failure checks:** test invalid, empty, truncated, oversized and unexpected input where relevant; test timeouts, missing files, permission errors and cleanup paths where relevant.
+5. **Integration check:** verify interaction with the real neighboring module or pinned third-party target—not only a mock—where feasible.
+6. **Clean reproducibility check:** repeat the relevant build/test from a clean, configuration-specific build directory.
+7. **Broader suite:** run the existing project test suite and static/format checks that are actually configured.
+
+Do not introduce a new test framework or quality tool without a task-specific reason. A test is evidence only if it was actually run. Record the command, environment/configuration, exit result and any relevant output. Clearly label checks as passed, failed, blocked or not run; never turn “not run” into “passed”.
+
+For KEKKAI's native fuzzing path, compilation alone is not acceptance. The harness must reach the intended library code, behave correctly on representative valid/empty/malformed inputs, produce AFL++ coverage feedback, and run with explicit time and memory limits before a campaign is accepted. Do not start a sustained campaign until those gates pass.
+
+### 11.6 Review correctness, security and scope
+
+Before integration, review the complete diff—not only the agent's summary—and check:
+
+- every changed file belongs to the approved task;
+- control flow, error handling, cleanup and resource bounds are correct;
+- user-controlled values cannot become arbitrary shell commands or unrestricted paths;
+- no secrets, private data, downloaded source archives, generated binaries, databases or crash artifacts were added accidentally;
+- dependencies, licenses, source provenance and version pins are appropriate;
+- tests cover the changed behavior and a regression case where applicable;
+- documentation describes only behavior that exists and has been verified;
+- no unsupported vulnerability, performance, compatibility or completion claim is made.
+
+If a review concern is unresolved, do not merge. Record it as a blocker or a known limitation instead of hiding it.
+
+### 11.7 Integrate only after the gate passes
+
+A task can be integrated only when:
+
+- its acceptance checks pass, or every remaining exception is explicitly accepted by the project owner;
+- the diff has been reviewed;
+- actual test evidence is available;
+- required documentation is updated;
+- the branch is based on the current `development` branch and has no unexplained changes.
+
+The project owner authorizes commits, pushes and merges. Do not let an implementation agent perform them by default. Merge focused work into `development` only after review. Move verified milestones from `development` to `main` deliberately; `main` is not a working branch.
+
+After integration, verify the resulting branch/commit and working-tree state. Record the commit identifier and what was actually verified.
+
+### 11.8 Handle failures without creating more failures
+
+When a command, build or test fails:
+
+1. Stop the sequence at the first meaningful failure; do not continue as though later output were trustworthy.
+2. Preserve the exact error, command, exit code, relevant logs, source revision and tool versions.
+3. Identify the failing layer: environment, dependency, configure/build, harness, target, test, orchestration or data.
+4. Reproduce the failure with the smallest controlled case.
+5. Change one likely cause at a time and rerun the narrowest relevant check.
+6. Once corrected, run the regression check and the affected integration checks again.
+7. Record unresolved uncertainty and the next safe action.
+
+Do not respond to an unexplained failure by randomly upgrading packages, changing several flags, deleting build/artifact directories or rewriting unrelated code. Clean generated files only after confirming they are disposable; never delete original crash evidence or user data as part of troubleshooting.
+
+### 11.9 Definition of done and task report
+
+A task is **done** only when its intended behavior exists, the agreed acceptance checks have actually passed, the diff has been reviewed, required documentation reflects reality, and the resulting Git state is known. If any of these are missing, report the task as partial or blocked—not complete.
+
+Close each task with a short record:
+
+- **Outcome:** what changed.
+- **Files/branch/commit:** where the change lives.
+- **Verification:** exact checks run and their pass/fail/blocked status.
+- **Limitations:** what remains untested or uncertain.
+- **Next action:** one concrete next step.
+
+Keep the work incremental. Complete and verify one task before starting another major task.
+
+## 12. Mandatory stop points
+
+Pause for project-owner review before:
+
+- changing a locked technology, architecture boundary, project goal or target scope;
+- adding a non-trivial runtime/build dependency;
+- changing a public API or persistent database format;
+- expanding from the pilot target to another target;
+- running a longer fuzzing campaign or a test with materially different risk/resource requirements;
+- transmitting source code, crash artifacts or logs outside the local environment;
+- committing, pushing, merging or releasing work when that action has not been explicitly authorized.
+
+Routine implementation choices within an approved task do not need a separate approval round. This keeps control over material risks without turning every small edit into a meeting.
+
