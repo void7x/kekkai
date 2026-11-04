@@ -1,6 +1,6 @@
 # Development Plan
 
-This plan follows [Workflow and Technology Decisions](WORKFLOW_DECISIONS.md). Each phase is a verified slice. A phase is not complete because code was generated; its acceptance checks must pass.
+This plan follows [Workflow and Technology Decisions](WORKFLOW_DECISIONS.md). Every individual task must use the repeatable engineering procedure and mandatory stop points in sections 11 and 12 of that document. Each phase is a verified slice; a phase is not complete because code was generated, and its acceptance checks must pass.
 
 ## Working rules
 
