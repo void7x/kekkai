@@ -50,6 +50,7 @@ The archive checksum was verified after download and again before extraction. Th
    - completion through `png_read_end()`.
 5. Exercise real libpng code with representative valid and malformed inputs. The initial valid, empty, malformed, truncated and over-8-MiB functional smoke tests have passed.
 6. Verify coverage feedback from the instrumented library and harness. An `afl-showmap` comparison against the same AFL-instrumented harness linked to uninstrumented baseline libpng demonstrated a 20,800-byte target map versus a 192-byte control map; details are in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
+7. Validate a valid 8×8 RGBA Adam7 PNG and confirm two identical coverage maps for that testcase (579 non-zero entries; matching SHA-256 recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`).
 7. Run sanitizer validation and record the results.
 8. Keep all build directories, temporary corpora, logs and crash artifacts outside tracked source unless a small fixture is explicitly approved.
 
