@@ -51,7 +51,7 @@ Because this profile uses trap mode, the compiler does not need to emit the usua
 
 The probe verifies the AFL++ wrapper's UBSan trap behavior. The libpng build log independently reported UBSAN mode; this record does not claim that a per-object disassembly audit of all 17 archive members was performed.
 
-## Scope and remaining gates
+## Initial library-build checkpoint (historical; superseded by later validation records)
 
 This initial section records the library-build checkpoint. Later sections in this document record the harness implementation, end-to-end coverage feedback, sanitizer replay, source-review corrections and final regression results.
 
@@ -93,7 +93,7 @@ The control executable still has AFL++ instrumentation in the harness itself (16
 
 These map-entry counts are per-input observations, not stable cross-build identifiers and not a measure of unique source lines or vulnerability severity. Raw map IDs must not be compared as stable identifiers across different builds.
 
-## Current validation boundary
+## Intermediate validation snapshot before Adam7 and resource-limit checks
 
 At this point:
 
@@ -132,7 +132,7 @@ This confirms repeatable coverage for this specific interlaced testcase in the c
 
 This was the initial row-buffer implementation. During final source review on 2026-11-05, it was replaced with calls to `png_read_row(png_ptr, NULL, NULL)` for each row/pass because the harness does not produce pixel output and does not need to retain row contents between Adam7 passes. The harness still enforces the 64 KiB decoded-row-size ceiling.
 
-## Updated harness validation status
+## Intermediate harness validation snapshot before resource-limit and sanitizer checks
 
 Passed so far:
 
@@ -169,7 +169,7 @@ Six additional controlled PNG inputs tested the approved harness limits. All six
 
 The inputs and logs remain under `~/kekkai-work/verification/libpng-harness`, outside the repository.
 
-## Updated validation status
+## Intermediate validation snapshot after resource-limit checks and before ASan+UBSan replay
 
 Passed:
 
@@ -232,7 +232,7 @@ UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 
 This is a successful run of the defined diagnostic corpus, not proof of absence of defects. The system zlib dependency was not rebuilt with sanitizers, so zlib internals are outside this instrumentation result.
 
-## Current gate after diagnostic replay
+## Diagnostic-replay checkpoint (superseded by final corrected regression closure)
 
 Passed: baseline upstream tests; AFL++ target-library build and UBSan trap-mode probe; harness functional tests; target-library coverage-map comparison; Adam7 and repeatability check; approved resource-limit tests; clean ASan+UBSan library/harness build; and 12-input sanitizer replay.
 
