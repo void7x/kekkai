@@ -1,6 +1,6 @@
 # First Target Integration — libpng 1.6.59
 
-**Status:** In progress — baseline build and all 37 upstream tests passed; AFL++ static-library build and UBSan trap-mode smoke test passed; C harness not yet implemented  
+**Status:** In progress — baseline tests, AFL++ instrumented libpng build, harness build, controlled input/limit tests, Adam7 test and coverage comparison passed; separate ASan+UBSan diagnostic replay and final harness review remain  
 **Base branch:** `development`  
 **Task branch:** `feature/libpng-first-target`  
 **Target:** libpng 1.6.59  
