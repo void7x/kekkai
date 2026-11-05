@@ -102,7 +102,7 @@ AFL++ explains the 64-bit ASan virtual-address-space versus `RLIMIT_AS` issue an
 
 ## 2. Additional checks accepted for implementation
 
-- Mechanically check the generated `pnglibconf.h` for the exact required features before accepting a profile, including read, sequential read, setjmp, interlacing and user/chunk limit support.
+- Mechanically check the generated `pnglibconf.h` for the exact required features before accepting a profile, including read, sequential read, setjmp, interlacing and `PNG_SET_USER_LIMITS_SUPPORTED`. In libpng 1.6.59, the public declarations for both `png_set_chunk_cache_max()` and `png_set_chunk_malloc_max()` are guarded by `PNG_SET_USER_LIMITS_SUPPORTED`; separate per-chunk-limit feature macros do not exist in this release.
 - Record whether CMake used the AWK/DFA generation path or the prebuilt header fallback, and record the selected AWK executable.
 - Record resolved zlib version, include directory and library for each profile. Keep zlib consistent between profiles.
 - Set `CMAKE_POSITION_INDEPENDENT_CODE=ON` for the static AFL++ target build as a conservative link-compatibility measure.
