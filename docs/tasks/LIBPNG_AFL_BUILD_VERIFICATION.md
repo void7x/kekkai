@@ -112,3 +112,39 @@ Still pending:
 - Final source review and bounded smoke-fuzz decision.
 
 No sustained fuzzing campaign has been started.
+
+
+## Interlaced PNG and repeatability checks
+
+**Date:** 2026-11-05
+
+A valid 8×8 RGBA Adam7-interlaced PNG was generated locally and decoded by the harness. The harness exited normally with no libpng fatal diagnostic.
+
+The exact same Adam7 testcase was then run twice with `afl-showmap` against the AFL++-instrumented libpng executable. Results:
+
+- AFL map size reported by AFL++: 20,800 bytes on both runs.
+- Non-zero map entries: 579 on both runs.
+- Both map files had SHA-256:
+  `de40ce918f88d0458e97462641b24d107b22de3aae191cd8ccc09276211ff2e1`.
+- `cmp` reported the two map files identical.
+
+This confirms repeatable coverage for this specific interlaced testcase in the current build and environment. It is not a general determinism guarantee for all inputs, processes or builds.
+
+The row buffer is intentionally reused as a bounded parser/decoder-coverage buffer. The harness does not validate or reconstruct final Adam7 pixel output; the identical maps establish execution repeatability only.
+
+## Updated harness validation status
+
+Passed so far:
+
+- Harness build/link against the AFL++-instrumented libpng archive.
+- Valid, empty, malformed, truncated and over-8-MiB input smoke tests.
+- Instrumented-libpng versus uninstrumented-libpng coverage-map comparison.
+- Valid Adam7 input decode.
+- Two-run identical AFL coverage map for the Adam7 testcase.
+
+Still pending:
+
+- Explicit dimension and total-pixel budget tests.
+- Ancillary chunk allocation-limit test.
+- Separate ASan+UBSan rebuild of both libpng and harness, followed by corpus replay.
+- Final source review and bounded smoke-fuzz decision.
