@@ -65,3 +65,50 @@ Remaining work for this task:
 6. Only after the validation gates pass, consider a short bounded smoke campaign. No sustained campaign is authorized by this record.
 
 No downloaded libpng source, build directory, temporary corpus or generated binary is added to the repository.
+
+
+## End-to-end coverage-map comparison
+
+**Date:** 2026-11-05
+
+A control executable was built with the same AFL++-instrumented harness source but linked against the ordinary, uninstrumented baseline archive. This distinguishes instrumentation in the harness from instrumentation in libpng itself.
+
+Commands used AFL++ `afl-showmap` with `-m 512 -t 1000+` against the same four testcase files:
+
+- valid 1×1 PNG;
+- empty input;
+- malformed non-PNG bytes;
+- truncated PNG.
+
+The instrumented-libpng executable acquired a **20,800-byte** AFL map. The control executable linked to baseline libpng acquired a **192-byte** AFL map. Per-input non-zero map-entry counts were:
+
+| Input | AFL-instrumented libpng | Baseline uninstrumented libpng |
+|---|---:|---:|
+| Valid | 517 | 23 |
+| Empty | 176 | 20 |
+| Malformed | 189 | 24 |
+| Truncated | 519 | 27 |
+
+The control executable still has AFL++ instrumentation in the harness itself (168 locations reported when it was compiled); its smaller map is therefore expected. The substantially larger map for the instrumented-libpng executable, together with the 1,987-location instrumentation report from the library build, is evidence that AFL++ coverage instrumentation is present in libpng and observable through the harness.
+
+These map-entry counts are per-input observations, not stable cross-build identifiers and not a measure of unique source lines or vulnerability severity. Raw map IDs must not be compared as stable identifiers across different builds.
+
+## Current validation boundary
+
+At this point:
+
+- AFL++ instrumented static libpng build: passed.
+- AFL++ UBSan trap-mode probe: passed.
+- Harness compile/link against the instrumented archive: passed without compiler warnings in the captured output.
+- Valid, empty, malformed, truncated and over-8-MiB functional smoke inputs: passed with expected outcomes.
+- Same-input AFL map comparison against uninstrumented libpng: passed as described above.
+
+Still pending:
+
+- Adam7/interlaced PNG testcase.
+- Explicit width, total-pixel and chunk-allocation limit tests.
+- Repeated-run/determinism check.
+- Separate clean ASan+UBSan rebuild of both libpng and harness, followed by corpus replay.
+- Final source review and bounded smoke-fuzz decision.
+
+No sustained fuzzing campaign has been started.
