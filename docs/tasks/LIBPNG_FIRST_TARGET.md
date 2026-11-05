@@ -133,7 +133,7 @@ The intended sequential read path is:
 
 This harness is intended to exercise parsing/decoding code, not to validate final pixel output. Reusing one row buffer across Adam7 passes is not a claim that the final interlaced pixel image is reconstructed correctly. It is a bounded parser-coverage harness.
 
-Do not assume every optional resource-limit or interlacing API exists: mechanically check the generated `pnglibconf.h` feature macros and fail clearly or document a justified fallback.
+Do not assume every optional resource-limit or interlacing API exists: mechanically check the generated `pnglibconf.h` feature macros and fail clearly or document a justified fallback. For libpng 1.6.59, `png_set_chunk_cache_max()` and `png_set_chunk_malloc_max()` are declared inside the single `PNG_SET_USER_LIMITS_SUPPORTED` guard in `png.h`; there are no separate `PNG_SET_CHUNK_CACHE_LIMIT_SUPPORTED` or `PNG_SET_CHUNK_MALLOC_LIMIT_SUPPORTED` feature macros. Check the actual declarations/guard in the pinned public header rather than testing invented per-API macros.
 
 ### Approved pilot resource limits — 2026-11-04
 
