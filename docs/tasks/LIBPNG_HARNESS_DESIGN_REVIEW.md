@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-04  
 **Applies to:** `docs/tasks/LIBPNG_FIRST_TARGET.md`  
-**Status:** Technical review completed; design clarifications accepted; pilot resource limits approved by project owner on 2026-11-04; no harness implementation started.
+**Status:** Initial technical review and final source review completed; pilot resource limits approved by project owner on 2026-11-04; corrected harness regression gates passed on 2026-11-05.
 
 This addendum records the independent review and the architecture/review lead's verification against the exact libpng `v1.6.59` source tag and current AFL++ guidance. It supplements the approved task; it does not widen the project scope.
 
@@ -41,7 +41,7 @@ If a custom error callback is installed, it must save a bounded diagnostic messa
 
 C says that non-volatile automatic objects local to the function containing `setjmp` become indeterminate after `longjmp` if they were changed between the two calls. The harness must not rely on local pointers/flags modified after setjmp during cleanup.
 
-Preferred design: allocate one per-input context/state structure before setjmp, initialize its pointer before setjmp, and do not reassign that automatic pointer afterward. Store mutable cleanup state in the heap-allocated context: libpng pointers, input cursor, row-buffer pointer, and bounded diagnostic buffers. Alternatively, any modified automatic object used after longjmp must be correctly volatile-qualified. Keep the implementation simple and document the chosen pattern.
+Preferred design: allocate one per-input context/state structure before setjmp, initialize its pointer before setjmp, and do not reassign that automatic pointer afterward. Store mutable cleanup state in the heap-allocated context: libpng pointers, input cursor, warning/error state and bounded diagnostic buffers. The corrected harness does not maintain an application row buffer. Alternatively, any modified automatic object used after longjmp must be correctly volatile-qualified. Keep the implementation simple and document the chosen pattern.
 
 ### 1.5 Explicit build configuration
 
@@ -59,7 +59,7 @@ Link the harness to the exact `libpng16.a` produced by the same profile, plus th
 
 ### 1.7 Resource and CPU limits must be numerical
 
-Apply `png_set_user_limits()` after creating the read structure and before `png_read_info()`. In addition, check the total pixel count after reading IHDR, using division to avoid multiplication overflow, and check rowbytes after `png_read_update_info()` before allocating the row buffer.
+Apply `png_set_user_limits()` after creating the read structure and before `png_read_info()`. In addition, check the total pixel count after reading IHDR, using division to avoid multiplication overflow, and check `png_get_rowbytes()` after `png_read_update_info()` against the 64 KiB decoded-row-size ceiling. The corrected harness does not allocate an application row buffer.
 
 Do not assume that a per-chunk allocation cap also limits total decoded image work. Add a total-pixel budget and an explicit AFL timeout. Important libpng semantics:
 - `png_set_chunk_malloc_max(png_ptr, 0)` means unlimited; zero is not a safe restrictive value.
@@ -74,7 +74,7 @@ Do not assume that a per-chunk allocation cap also limits total decoded image wo
 | Image width | 8,192 pixels | `png_set_user_limits()` |
 | Image height | 8,192 pixels | `png_set_user_limits()` |
 | Total pixels | 16,000,000 | Overflow-safe check after IHDR, before row decoding |
-| Decoded row buffer | 64 KiB | Check `png_get_rowbytes()` after update-info |
+| Decoded row size | 64 KiB | Check `png_get_rowbytes()` after update-info; no application row buffer is allocated |
 | Individual ancillary chunk allocation | 256 KiB | `png_set_chunk_malloc_max()`; never pass zero |
 | Cached variable ancillary chunks | 128 per info structure | `png_set_chunk_cache_max()` |
 | AFL execution timeout | 1,000 ms with AFL++ auto-scaling | Explicit `-t 1000+` on the later bounded campaign |
@@ -90,7 +90,7 @@ If `PNG_READ_INTERLACING_SUPPORTED` is enabled, call:
 passes = png_set_interlace_handling(png_ptr);
 ```
 
-before `png_read_update_info()`. Then read `height` rows for each returned pass. The 1.6.59 upstream OSS-Fuzz harness uses this pass-major pattern with one reusable row buffer. Our harness is a parser/decoder coverage target, not a pixel-output validator; document that the reused row buffer is not intended to reconstruct a correct final interlaced image. Do not claim pixel correctness from this harness.
+before `png_read_update_info()`. Then call `png_read_row(png_ptr, NULL, NULL)` for `height` rows in each returned pass. The upstream 1.6.59 OSS-Fuzz harness uses a row buffer, but KEKKAI does not need to retain pixels: libpng's sequential decoder still processes the image data when both row arguments are NULL. This avoids incorrect cross-row/cross-pass reuse. The harness remains a parser/decoder coverage target, not a pixel-output validator; do not claim pixel correctness.
 
 ### 1.9 Sanitizer profile must instrument both library and harness
 
@@ -132,4 +132,4 @@ AFL++ explains the 64-bit ASan virtual-address-space versus `RLIMIT_AS` issue an
 
 ## 5. Current implementation status
 
-The baseline libpng 1.6.59 build and all 37 configured upstream tests have passed, as recorded in `LIBPNG_BASELINE_VERIFICATION.md`. The AFL++ static-library build and UBSan trap-mode smoke test have now passed, as recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`. The C harness, separate ASan+UBSan diagnostic build and fuzzing campaign remain not started.
+The baseline libpng 1.6.59 build and all 37 configured upstream tests passed. The AFL++ library build and UBSan trap-mode probe passed. Final source review corrected the interlaced read loop to use NULL row arguments and added fatal allocation-message classification for libpng 1.6.59's direct, chunk-prefixed and zlib insufficient-memory paths. The corrected 12-input ASan+UBSan replay passed; both chunk-limit warning cases remained non-fatal; the corrected five-input AFL++ comparison showed 509/181/194/513/556 tuples for instrumented libpng versus 26/25/29/32/28 for the baseline control. The corrected Adam7 coverage map repeated byte-for-byte. A forced allocation-failure injection test was not performed, so classification of that path is source-reviewed but not experimentally triggered. The defined harness validation gates are closed. No `afl-fuzz` campaign has started; bounded campaign parameters require project-owner approval.

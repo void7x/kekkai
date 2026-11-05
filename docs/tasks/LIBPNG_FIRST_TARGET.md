@@ -1,6 +1,6 @@
 # First Target Integration — libpng 1.6.59
 
-**Status:** In progress — baseline build and all 37 upstream tests passed; AFL++ static-library build and UBSan trap-mode smoke test passed; C harness not yet implemented  
+**Status:** In progress — baseline, AFL++ instrumentation, corrected harness source review, 12-input ASan+UBSan replay, resource-limit tests and final coverage regression passed; bounded smoke-campaign parameters still require project-owner approval  
 **Base branch:** `development`  
 **Task branch:** `feature/libpng-first-target`  
 **Target:** libpng 1.6.59  
@@ -48,8 +48,9 @@ The archive checksum was verified after download and again before extraction. Th
    - explicit image and chunk/resource limits where the generated configuration supports them;
    - sequential decoding by rows rather than allocating the entire image;
    - completion through `png_read_end()`.
-5. Exercise real libpng code with representative valid and malformed inputs.
-6. Verify coverage feedback from the instrumented library and harness.
+5. Exercise real libpng code with representative valid and malformed inputs. The initial valid, empty, malformed, truncated and over-8-MiB functional smoke tests have passed.
+6. Verify coverage feedback from the instrumented library and harness. An `afl-showmap` comparison against the same AFL-instrumented harness linked to uninstrumented baseline libpng demonstrated a 20,800-byte target map versus a 192-byte control map; details are in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
+7. Validate a valid 8×8 RGBA Adam7 PNG and confirm two identical coverage maps for that testcase (579 non-zero entries; matching SHA-256 recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`).
 7. Run sanitizer validation and record the results.
 8. Keep all build directories, temporary corpora, logs and crash artifacts outside tracked source unless a small fixture is explicitly approved.
 
@@ -127,11 +128,11 @@ The intended sequential read path is:
 6. Set the explicit CRC policy before reading metadata: `png_set_crc_action(png_ptr, PNG_CRC_QUIET_USE, PNG_CRC_QUIET_USE)`. This coverage-oriented fuzzing policy uses data even when chunk checksums are wrong; it is not strict checksum-validation mode. Do not patch the pinned libpng source to disable checksums.
 7. Read PNG metadata. Validate width, height and the total pixel budget using overflow-safe arithmetic before decoding any rows.
 8. Configure selected transforms, call `png_set_interlace_handling()` when the generated feature is enabled, and do so before `png_read_update_info()`. Read `height` rows for each reported interlace pass.
-9. Check `png_get_rowbytes()` against the approved row-buffer limit before allocating the row buffer. Decode row by row; do not use `png_read_image()` or allocate a full image buffer for this first harness.
+9. Check `png_get_rowbytes()` against the 64 KiB decoded-row-size ceiling after update-info. Because this harness does not produce or validate pixels, call `png_read_row(png_ptr, NULL, NULL)` for each row in every reported pass; do not allocate an application row buffer, call `png_read_image()`, or allocate a full image.
 10. Call `png_read_end(png_ptr, end_info_ptr)` with the non-NULL end-info structure so post-IDAT ancillary chunks are parsed.
 11. Save useful bounded error/warning diagnostics, then destroy all libpng structures and release harness-owned state on normal and error paths.
 
-This harness is intended to exercise parsing/decoding code, not to validate final pixel output. Reusing one row buffer across Adam7 passes is not a claim that the final interlaced pixel image is reconstructed correctly. It is a bounded parser-coverage harness.
+This harness is intended to exercise parsing/decoding code, not to validate final pixel output. It supplies NULL for both row and display-row arguments to `png_read_row()` because it does not need to retain or reconstruct pixels across Adam7 passes. The 64 KiB check is a decoded-row-size ceiling, not an application row-buffer allocation. This is a bounded parser/decoder-coverage harness.
 
 Do not assume every optional resource-limit or interlacing API exists: mechanically check the generated `pnglibconf.h` feature macros and fail clearly or document a justified fallback. For libpng 1.6.59, `png_set_chunk_cache_max()` and `png_set_chunk_malloc_max()` are declared inside the single `PNG_SET_USER_LIMITS_SUPPORTED` guard in `png.h`; there are no separate `PNG_SET_CHUNK_CACHE_LIMIT_SUPPORTED` or `PNG_SET_CHUNK_MALLOC_LIMIT_SUPPORTED` feature macros. Check the actual declarations/guard in the pinned public header rather than testing invented per-API macros.
 
@@ -145,7 +146,7 @@ The project owner approved these initial limits for the laptop-based libpng pilo
 | Image width | 8,192 pixels | `png_set_user_limits()`, before `png_read_info()` |
 | Image height | 8,192 pixels | `png_set_user_limits()`, before `png_read_info()` |
 | Total image pixels | 16,000,000 | Overflow-safe width/height check after IHDR and before row decoding |
-| Decoded row buffer | 64 KiB | Check `png_get_rowbytes()` after `png_read_update_info()` and before allocation |
+| Decoded row size | 64 KiB | Check `png_get_rowbytes()` after `png_read_update_info()`; no application row buffer is allocated |
 | Individual ancillary chunk allocation | 256 KiB | `png_set_chunk_malloc_max()`; zero is forbidden because it means unlimited |
 | Cached variable ancillary chunks | 128 per info structure | `png_set_chunk_cache_max()`; this is a count, not a byte limit |
 | AFL++ timeout | 1,000 ms plus AFL++ calibration (`-t 1000+`) | Apply to the later bounded fuzzing run |
@@ -172,7 +173,7 @@ This task is complete only when all applicable checks below have retained eviden
 - A non-NULL end-info structure is required for the `png_read_end()` call.
 - The short-read callback rejects before any out-of-bounds copy and signals a fatal libpng error.
 - Mutable cleanup state changed after `setjmp` remains valid after `longjmp`; use a pre-initialized heap context or correctly volatile-qualified automatic state.
-- Interlaced input uses the interlace-handling API before update-info and reads each reported pass.
+- Interlaced input uses the interlace-handling API before update-info and calls `png_read_row(png_ptr, NULL, NULL)` for each row in every reported pass; no pixel-row buffer is maintained.
 - Harness include paths and its static archive come from the same profile build; do not accidentally link a system libpng.
 - The ASan+UBSan diagnostic build instruments both libpng and the harness.
 
@@ -233,3 +234,21 @@ At task close, record:
 - AFL++ ASan guidance, including 64-bit memory-limit caveats: https://aflplus.plus/docs/notes_for_asan/
 - AFL++ sanitizer environment variables: https://aflplus.plus/docs/env_variables/
 - AFL++ best practices: https://aflplus.plus/docs/best_practices/
+
+
+## 10. Execution status update — 2026-11-05
+
+The separate diagnostic profile rebuilt all 17 libpng C translation units with AddressSanitizer and UndefinedBehaviorSanitizer, then linked the manually authored harness against that exact archive. The generated configuration header and all 17 compile-command sanitizer flags were verified.
+
+The defined 12-input diagnostic corpus passed: valid and Adam7 PNGs; malformed, truncated and empty inputs; width, height and total-pixel limit cases; the exact 64 KiB row boundary; both ancillary chunk-limit cases; and the over-8-MiB input. Every process exited with status 0 and no ASan, LeakSanitizer or UBSan diagnostic was detected. Detailed commands, configuration and outcomes are in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
+
+The source-review and defined validation gates for the corrected harness are now closed. The corrected source removes the shared row-buffer implementation for Adam7 and classifies fatal libpng allocation failures in the error callback. The 12-input ASan+UBSan replay, both chunk-limit warning checks and final five-input AFL++ coverage comparison passed. The exact results and the allocation-failure fault-injection limitation are recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`. This does not prove absence of defects or instrument system zlib. A short bounded AFL++ smoke campaign is a separate next step requiring explicit project-owner approval of duration, memory cap, WSL resource availability and stop conditions. No campaign has started.
+
+
+## 11. Corrected harness verification closure — 2026-11-05
+
+Final source review led to two narrow corrections. The harness now passes NULL row pointers to `png_read_row()` for every row and Adam7 pass because pixel output is not required; the 64 KiB `png_get_rowbytes()` check remains a decoded-row-size ceiling, not a buffer allocation. The fatal error callback now classifies libpng 1.6.59 allocation-related fatal messages (including chunk-prefixed out-of-memory and zlib insufficient-memory messages) as harness failures. Chunk warnings remain non-fatal because they use the separate warning callback.
+
+The latest AFL++, baseline-control and ASan+UBSan harness executables were rebuilt. The corrected 12-input ASan+UBSan replay passed without sanitizer diagnostics. The five-input coverage comparison passed for valid, empty, malformed, truncated and Adam7 files; the corrected Adam7 coverage map was byte-identical on repeat. Both ancillary chunk-limit warnings were preserved. The exact counts, hash and log paths are recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
+
+A forced allocation-failure test was not performed; this classification is source-reviewed but not fault-injection-tested. The defined harness source-review and regression gates are closed. A bounded smoke campaign remains unstarted pending explicit approval of its time, memory and stop parameters.
