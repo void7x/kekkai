@@ -1,6 +1,6 @@
 # First Target Integration — libpng 1.6.59
 
-**Status:** In progress — baseline tests, AFL++ instrumented libpng build, harness build, controlled input/limit tests, Adam7 test and coverage comparison passed; separate ASan+UBSan diagnostic replay and final harness review remain  
+**Status:** In progress — baseline tests, AFL++ instrumented libpng build, harness validation, coverage comparison, resource-limit tests, and separate 12-input ASan+UBSan diagnostic replay passed; final harness review and bounded-campaign decision remain  
 **Base branch:** `development`  
 **Task branch:** `feature/libpng-first-target`  
 **Target:** libpng 1.6.59  
@@ -234,3 +234,12 @@ At task close, record:
 - AFL++ ASan guidance, including 64-bit memory-limit caveats: https://aflplus.plus/docs/notes_for_asan/
 - AFL++ sanitizer environment variables: https://aflplus.plus/docs/env_variables/
 - AFL++ best practices: https://aflplus.plus/docs/best_practices/
+
+
+## 10. Execution status update — 2026-11-05
+
+The separate diagnostic profile rebuilt all 17 libpng C translation units with AddressSanitizer and UndefinedBehaviorSanitizer, then linked the manually authored harness against that exact archive. The generated configuration header and all 17 compile-command sanitizer flags were verified.
+
+The defined 12-input diagnostic corpus passed: valid and Adam7 PNGs; malformed, truncated and empty inputs; width, height and total-pixel limit cases; the exact 64 KiB row boundary; both ancillary chunk-limit cases; and the over-8-MiB input. Every process exited with status 0 and no ASan, LeakSanitizer or UBSan diagnostic was detected. Detailed commands, configuration and outcomes are in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
+
+This closes the sanitizer-replay gate for the current corpus. It does not prove the absence of defects, instrument system zlib, or establish that a fuzzing campaign has found or ruled out vulnerabilities. The next gate is final source review of the harness. A short bounded AFL++ smoke campaign remains conditional on that review and explicit approval of its runtime/resource parameters; no campaign has started.
