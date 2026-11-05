@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-05  
 **Branch:** `feature/libpng-first-target`  
-**Status:** AFL++ static-library build and UBSan trap-mode smoke test passed; harness validation, coverage comparison, resource-limit tests, and separate 12-input ASan+UBSan diagnostic replay passed. Final harness source review and bounded-campaign decision remain.
+**Status:** First-target build and corrected harness validation gates passed, including baseline tests, AFL++ instrumentation, resource limits, separate ASan+UBSan replay (12/12), and final corrected coverage comparison. Forced allocation-failure injection was not performed. No AFL++ fuzzing campaign has started; bounded-campaign parameters still require project-owner approval.
 
 ## Source and build identity
 
@@ -53,7 +53,7 @@ The probe verifies the AFL++ wrapper's UBSan trap behavior. The libpng build log
 
 ## Scope and remaining gates
 
-This record verifies the AFL++ static-library build and the compiler-wrapper UBSan trap behavior only. It does **not** verify a KEKKAI harness, end-to-end AFL coverage feedback, sanitizer diagnostics on libpng through the harness, or vulnerability discovery.
+This initial section records the library-build checkpoint. Later sections in this document record the harness implementation, end-to-end coverage feedback, sanitizer replay, source-review corrections and final regression results.
 
 Remaining work for this task:
 
@@ -130,7 +130,7 @@ The exact same Adam7 testcase was then run twice with `afl-showmap` against the 
 
 This confirms repeatable coverage for this specific interlaced testcase in the current build and environment. It is not a general determinism guarantee for all inputs, processes or builds.
 
-The row buffer is intentionally reused as a bounded parser/decoder-coverage buffer. The harness does not validate or reconstruct final Adam7 pixel output; the identical maps establish execution repeatability only.
+This was the initial row-buffer implementation. During final source review on 2026-11-05, it was replaced with calls to `png_read_row(png_ptr, NULL, NULL)` for each row/pass because the harness does not produce pixel output and does not need to retain row contents between Adam7 passes. The harness still enforces the 64 KiB decoded-row-size ceiling.
 
 ## Updated harness validation status
 
@@ -161,7 +161,7 @@ Six additional controlled PNG inputs tested the approved harness limits. All six
 | Width 8,193 | libpng rejected the IHDR under the configured 8,192-pixel width limit and emitted an explanatory warning |
 | Height 8,193 | libpng rejected the IHDR under the configured 8,192-pixel height limit and emitted an explanatory warning |
 | 8,192 × 2,048 pixels | Harness rejected the image before row decoding because the 16,000,000-pixel budget would be exceeded |
-| RGBA16 row at exactly 64 KiB | Accepted and decoded successfully; confirms the inclusive row-buffer boundary |
+| RGBA16 row at exactly 64 KiB | Accepted and decoded successfully; confirms the inclusive decoded-row-size boundary |
 | Ancillary tEXt allocation above 256 KiB | libpng refused the over-limit internal chunk-buffer allocation, emitted `tEXt: out of memory`, and continued safely without retaining that text chunk |
 | 130 tEXt chunks with cache limit 128 | libpng reached its configured chunk-cache limit, emitted `tEXt: no space in chunk cache`, and continued safely without retaining excess text chunks |
 
@@ -177,7 +177,7 @@ Passed:
 - Harness build/link and initial valid/invalid/oversized input checks.
 - AFL coverage comparison showing the larger instrumented-libpng map.
 - Valid Adam7 decode and identical two-run coverage maps for that input.
-- Width, height, total-pixel and exact row-buffer boundary tests.
+- Width, height, total-pixel and exact decoded-row-size boundary tests.
 - Ancillary chunk allocation and cache-limit warning/skip tests.
 
 Remaining:
@@ -236,4 +236,58 @@ This is a successful run of the defined diagnostic corpus, not proof of absence 
 
 Passed: baseline upstream tests; AFL++ target-library build and UBSan trap-mode probe; harness functional tests; target-library coverage-map comparison; Adam7 and repeatability check; approved resource-limit tests; clean ASan+UBSan library/harness build; and 12-input sanitizer replay.
 
-Still required before a bounded smoke campaign: final source review of the harness and an explicit project-owner decision on the campaign parameters. No AFL++ fuzzing campaign has been started.
+Final harness source review and the planned regression checks are complete for the current implementation. The corrected 12-input ASan+UBSan replay, chunk-limit warning checks, five-input instrumented-versus-control coverage comparison, and byte-identical Adam7 map repeat passed. Forced allocation-failure injection was not performed and is recorded as an untested path. A bounded AFL++ smoke campaign remains a separate step requiring explicit project-owner approval of runtime and resource parameters. No `afl-fuzz` campaign has started.
+
+
+## Final corrected harness review and regression closure
+
+**Date:** 2026-11-05
+
+The final source review identified and corrected two issues in the manually authored C harness:
+
+1. **Adam7 row handling:** the first implementation reused one application row buffer across every row and pass. Because this harness does not validate or emit pixels, it now calls `png_read_row(png_ptr, NULL, NULL)` for each row in every pass. The application-owned row buffer, its allocation and cleanup were removed. The `png_get_rowbytes()` check remains as a 64 KiB decoded-row-size ceiling; it is not an application buffer allocation.
+2. **Fatal allocation classification:** the fatal error callback now marks allocation-related errors as harness failures before `png_longjmp()`. The classifier recognizes the pinned libpng 1.6.59 messages `out of memory`, case variants used by its allocation functions, and `insufficient memory` from its `Z_MEM_ERROR` reporting path. This matching is confined to the fatal error callback; non-fatal ancillary chunk warnings remain on the separate warning callback and do not set the harness-failure flag.
+
+Both corrections were followed by rebuilds of the AFL++/UBSan harness, the separate ASan+UBSan harness and the AFL-instrumented control harness linked against the ordinary baseline libpng archive. No compiler warnings or errors appeared in the captured build output.
+
+### Corrected sanitizer replay
+
+The final corrected ASan+UBSan executable replayed all 12 testcases successfully, with each process exiting status 0 and no ASan, LeakSanitizer or UBSan diagnostic detected:
+
+- valid PNG and Adam7-interlaced PNG;
+- malformed, truncated and empty inputs;
+- width, height and total-pixel limit cases;
+- exact 64 KiB decoded-row-size boundary;
+- ancillary chunk allocation and chunk-cache limit cases;
+- over-8-MiB input.
+
+Logs: `~/kekkai-work/verification/libpng-harness/asan-ubsan-final`.
+
+The two chunk-limit cases still produce their expected non-fatal diagnostics:
+
+- `tEXt: out of memory`
+- `tEXt: no space in chunk cache`
+
+### Corrected AFL++ coverage comparison
+
+The corrected AFL++ harness linked to instrumented libpng was compared with the same corrected harness linked to the ordinary, uninstrumented baseline archive. `afl-showmap -m 512 -t 1000+` returned the following non-zero tuple counts:
+
+| Input | Instrumented libpng | Baseline control |
+|---|---:|---:|
+| Valid | 509 | 26 |
+| Empty | 181 | 25 |
+| Malformed | 194 | 29 |
+| Truncated | 513 | 32 |
+| Adam7 | 556 | 28 |
+
+All five inputs showed more tuples with instrumented libpng than with the baseline control. The corrected Adam7 map was then repeated; both map files were byte-for-byte identical with SHA-256:
+
+`1e9c29e05e7bfa4caf91a4c69488e607fb8dc7e997e794ae37e3e38a9c3fb6d5`.
+
+Logs and maps: `~/kekkai-work/verification/libpng-harness/coverage-final`.
+
+### Remaining limitations and next decision
+
+The allocation-failure classifier was checked against the exact libpng 1.6.59 source strings and fatal-error flow. **No forced allocation-failure/fault-injection test was performed**, so the behavior is source-reviewed but not experimentally triggered. The existing corpus also does not establish absence of defects. System zlib remains uninstrumented.
+
+The source-review and defined validation gates for the current harness are closed. No `afl-fuzz` campaign has started. A short bounded smoke campaign is a separate next step and requires explicit approval of its duration, memory cap, WSL resource availability and stop conditions. A sustained campaign is outside this first-target task.
