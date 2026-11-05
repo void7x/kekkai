@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-05  
 **Branch:** `feature/libpng-first-target`  
-**Status:** AFL++ static-library build passed; UBSan trap-mode smoke test passed; harness not yet implemented.
+**Status:** AFL++ static-library build and UBSan trap-mode smoke test passed; harness validation, coverage comparison, resource-limit tests, and separate 12-input ASan+UBSan diagnostic replay passed. Final harness source review and bounded-campaign decision remain.
 
 ## Source and build identity
 
@@ -186,3 +186,54 @@ Remaining:
 - Replay the representative corpus against that diagnostic build.
 - Final harness source review, including cleanup and resource-limit behavior.
 - Decide on a short bounded smoke fuzz run only after all validation gates pass.
+
+
+## Separate ASan+UBSan diagnostic build and replay
+
+**Date:** 2026-11-05
+
+A clean diagnostic profile was configured separately from the AFL++ build:
+
+- Build directory: `~/kekkai-work/builds/libpng-1.6.59-asan-ubsan`
+- Compiler: Clang 21.1.8
+- CMake build type: `RelWithDebInfo`
+- C flags: `-fsanitize=address,undefined -fno-omit-frame-pointer`
+- Executable linker flags: `-fsanitize=address,undefined`
+- CMake options: `PNG_SHARED=OFF`, `PNG_STATIC=ON`, `PNG_TESTS=OFF`, `PNG_TOOLS=OFF`, `PNG_FRAMEWORK=OFF`
+- zlib: 1.3.1, `/usr/lib/x86_64-linux-gnu/libz.so`, headers under `/usr/include`
+- Generated `pnglibconf.h` was checked for read, sequential read, ancillary chunks, interlacing, setjmp and user-limit support.
+- `compile_commands.json` contained 17 translation units; all 17 commands included the ASan+UBSan flags and frame-pointer flag.
+- The 17-object static archive `libpng16.a` was created successfully (approximately 4.2 MiB).
+- The manually authored harness was compiled and linked against this exact archive, the matching source/build include directories, system zlib and math library. The resulting diagnostic executable was approximately 4.4 MiB.
+
+The diagnostic executable replayed these 12 inputs under:
+
+```text
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+```
+
+| Input | Result |
+|---|---|
+| Valid 1×1 PNG | Passed |
+| Valid Adam7-interlaced PNG | Passed |
+| Malformed non-PNG input | Passed |
+| Truncated PNG | Passed |
+| Empty input | Passed |
+| Width over limit | Passed |
+| Height over limit | Passed |
+| Total pixels over limit | Passed |
+| Exact 64 KiB row boundary | Passed |
+| Ancillary chunk allocation over limit | Passed |
+| Chunk cache over limit | Passed |
+| Input over 8 MiB | Passed |
+
+**Result: 12/12 processes exited with status 0; no AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer diagnostic was detected by the replay checks.** Per-input logs are stored outside the repository under `~/kekkai-work/verification/libpng-harness/asan-ubsan`.
+
+This is a successful run of the defined diagnostic corpus, not proof of absence of defects. The system zlib dependency was not rebuilt with sanitizers, so zlib internals are outside this instrumentation result.
+
+## Current gate after diagnostic replay
+
+Passed: baseline upstream tests; AFL++ target-library build and UBSan trap-mode probe; harness functional tests; target-library coverage-map comparison; Adam7 and repeatability check; approved resource-limit tests; clean ASan+UBSan library/harness build; and 12-input sanitizer replay.
+
+Still required before a bounded smoke campaign: final source review of the harness and an explicit project-owner decision on the campaign parameters. No AFL++ fuzzing campaign has been started.
