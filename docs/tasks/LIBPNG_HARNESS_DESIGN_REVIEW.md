@@ -132,4 +132,4 @@ AFL++ explains the 64-bit ASan virtual-address-space versus `RLIMIT_AS` issue an
 
 ## 5. Current implementation status
 
-The baseline libpng 1.6.59 build and all 37 configured upstream tests have passed, as recorded in `LIBPNG_BASELINE_VERIFICATION.md`. The AFL++ static-library build and UBSan trap-mode smoke test have now passed, as recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`. The C harness, separate ASan+UBSan diagnostic build and fuzzing campaign remain not started.
+The baseline libpng 1.6.59 build and all 37 configured upstream tests have passed, as recorded in `LIBPNG_BASELINE_VERIFICATION.md`. The AFL++ static-library build, UBSan trap-mode smoke test, initial C harness build, five controlled-input smoke tests, and the AFL coverage-map comparison against uninstrumented baseline libpng have passed; details are in `LIBPNG_AFL_BUILD_VERIFICATION.md`. Remaining harness validation, the separate ASan+UBSan diagnostic build and any fuzzing campaign are still pending.
