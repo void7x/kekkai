@@ -57,4 +57,4 @@ This verifies the normal baseline build and its configured upstream test suite i
 
 ## Next gate
 
-The separate AFL++-instrumented static-library build and UBSan trap-mode smoke test have passed; see `LIBPNG_AFL_BUILD_VERIFICATION.md`. The next gate is the manually authored C harness. Do not begin a fuzzing campaign until the harness is validated and end-to-end coverage feedback is demonstrated.
+The separate AFL++-instrumented static-library build, UBSan trap-mode smoke test, harness validation, end-to-end coverage comparison, resource-limit checks, and separate 12-input ASan+UBSan diagnostic replay have passed; see `LIBPNG_AFL_BUILD_VERIFICATION.md`. The next gate is final review of the manually authored C harness. A bounded smoke campaign must remain on hold until that review is complete and its parameters are explicitly approved.
