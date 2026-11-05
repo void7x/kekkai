@@ -57,4 +57,4 @@ This verifies the normal baseline build and its configured upstream test suite i
 
 ## Next gate
 
-Configure a separate clean AFL++-instrumented build. Inspect and verify its CMake cache, generated feature header, and compiler commands before compiling it. Do not begin a fuzzing campaign until harness validation is complete.
+The separate AFL++-instrumented static-library build and UBSan trap-mode smoke test have passed; see `LIBPNG_AFL_BUILD_VERIFICATION.md`. The next gate is the manually authored C harness. Do not begin a fuzzing campaign until the harness is validated and end-to-end coverage feedback is demonstrated.
