@@ -148,3 +148,41 @@ Still pending:
 - Ancillary chunk allocation-limit test.
 - Separate ASan+UBSan rebuild of both libpng and harness, followed by corpus replay.
 - Final source review and bounded smoke-fuzz decision.
+
+
+## Resource-limit boundary tests
+
+**Date:** 2026-11-05
+
+Six additional controlled PNG inputs tested the approved harness limits. All six harness processes exited normally with status 0 and the expected parser/limit behavior was observed.
+
+| Test | Observed behavior |
+|---|---|
+| Width 8,193 | libpng rejected the IHDR under the configured 8,192-pixel width limit and emitted an explanatory warning |
+| Height 8,193 | libpng rejected the IHDR under the configured 8,192-pixel height limit and emitted an explanatory warning |
+| 8,192 × 2,048 pixels | Harness rejected the image before row decoding because the 16,000,000-pixel budget would be exceeded |
+| RGBA16 row at exactly 64 KiB | Accepted and decoded successfully; confirms the inclusive row-buffer boundary |
+| Ancillary tEXt allocation above 256 KiB | libpng refused the over-limit internal chunk-buffer allocation, emitted `tEXt: out of memory`, and continued safely without retaining that text chunk |
+| 130 tEXt chunks with cache limit 128 | libpng reached its configured chunk-cache limit, emitted `tEXt: no space in chunk cache`, and continued safely without retaining excess text chunks |
+
+**Interpretation:** the image dimension and pixel-budget limits cause parser/harness rejection. The chunk allocation and cache limits are not whole-file rejection policies: libpng handles those ancillary metadata conditions by warning and skipping/unretaining the affected chunk data. The test verifies safe limit behavior, not that every over-limit ancillary chunk makes the PNG invalid.
+
+The inputs and logs remain under `~/kekkai-work/verification/libpng-harness`, outside the repository.
+
+## Updated validation status
+
+Passed:
+
+- AFL++ static-library build and UBSan trap-mode probe.
+- Harness build/link and initial valid/invalid/oversized input checks.
+- AFL coverage comparison showing the larger instrumented-libpng map.
+- Valid Adam7 decode and identical two-run coverage maps for that input.
+- Width, height, total-pixel and exact row-buffer boundary tests.
+- Ancillary chunk allocation and cache-limit warning/skip tests.
+
+Remaining:
+
+- Separate clean ASan+UBSan build of both libpng and harness.
+- Replay the representative corpus against that diagnostic build.
+- Final harness source review, including cleanup and resource-limit behavior.
+- Decide on a short bounded smoke fuzz run only after all validation gates pass.
