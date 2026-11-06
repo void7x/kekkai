@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-05  
 **Branch:** `feature/libpng-first-target`  
-**Status:** First-target build and corrected harness validation gates passed, including baseline tests, AFL++ instrumentation, resource limits, separate ASan+UBSan replay (12/12), and final corrected coverage comparison. Forced allocation-failure injection was not performed. No AFL++ fuzzing campaign has started; bounded-campaign parameters still require project-owner approval.
+**Status:** Baseline and corrected harness validation passed; one bounded five-minute AFL++ smoke campaign completed with 280,452 executions, 252 new corpus entries, zero saved crashes and zero saved hangs. All 262 retained queue entries passed separate ASan+UBSan replay. AFL++ selected a 5 ms per-execution timeout despite `-t 1000+`. Forced allocation-failure injection remains untested, and system zlib is uninstrumented.
 
 ## Source and build identity
 
@@ -236,7 +236,7 @@ This is a successful run of the defined diagnostic corpus, not proof of absence 
 
 Passed: baseline upstream tests; AFL++ target-library build and UBSan trap-mode probe; harness functional tests; target-library coverage-map comparison; Adam7 and repeatability check; approved resource-limit tests; clean ASan+UBSan library/harness build; and 12-input sanitizer replay.
 
-Final harness source review and the planned regression checks are complete for the current implementation. The corrected 12-input ASan+UBSan replay, chunk-limit warning checks, five-input instrumented-versus-control coverage comparison, and byte-identical Adam7 map repeat passed. Forced allocation-failure injection was not performed and is recorded as an untested path. A bounded AFL++ smoke campaign remains a separate step requiring explicit project-owner approval of runtime and resource parameters. No `afl-fuzz` campaign has started.
+Final harness source review and the planned regression checks are complete for the current implementation. The corrected 12-input ASan+UBSan replay, chunk-limit warning checks, five-input instrumented-versus-control coverage comparison, and byte-identical Adam7 map repeat passed. Forced allocation-failure injection was not performed and is recorded as an untested path. This paragraph records the pre-campaign state at the time it was written. The subsequently approved campaign and retained-corpus sanitizer replay are documented in the follow-through section below.
 
 
 ## Final corrected harness review and regression closure
@@ -290,4 +290,93 @@ Logs and maps: `~/kekkai-work/verification/libpng-harness/coverage-final`.
 
 The allocation-failure classifier was checked against the exact libpng 1.6.59 source strings and fatal-error flow. **No forced allocation-failure/fault-injection test was performed**, so the behavior is source-reviewed but not experimentally triggered. The existing corpus also does not establish absence of defects. System zlib remains uninstrumented.
 
-The source-review and defined validation gates for the current harness are closed. No `afl-fuzz` campaign has started. A short bounded smoke campaign is a separate next step and requires explicit approval of its duration, memory cap, WSL resource availability and stop conditions. A sustained campaign is outside this first-target task.
+The source-review and defined validation gates for the current harness were closed at this checkpoint. At that time, no `afl-fuzz` campaign had started. The subsequent bounded smoke campaign is recorded below. A sustained campaign remains outside this first-target task.
+
+## Bounded AFL++ smoke campaign — 2026-11-05
+
+### Campaign configuration
+
+- Target: libpng 1.6.59 with the manually authored `kekkai_png_harness`.
+- AFL++ version: 4.33c.
+- Target instrumentation: AFL++ coverage instrumentation and UBSan trap mode; not ASan.
+- Workers: one AFL++ instance, configured as `default`.
+- Duration: `-V 300`.
+- Target memory limit: `-m 512` MiB.
+- Requested execution timeout: `-t 1000+`.
+- External wall-clock watchdog: seven minutes; it did not intervene.
+- Process priority: `nice -n 10`.
+- Starting corpus: ten selected PNG seeds.
+- AFL++ generated-input maximum: 1 MiB.
+- Output and logs remained outside the Git repository.
+
+A campaign-local `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:symbolize=0` setting was supplied to satisfy AFL++ 4.33c startup validation. This did not make the fuzzing target ASan-instrumented. The target remained the AFL++/UBSan-trap build.
+
+### Campaign results
+
+| Metric | Result |
+|---|---:|
+| AFL++ process exit status | 0 |
+| Total runtime | 300 seconds |
+| Active fuzz time | 276 seconds |
+| Calibration time | 2 seconds |
+| Trimming time | 21 seconds |
+| Executions | 280,452 |
+| Average execution rate | 934.78/sec |
+| Initial seeds | 10 |
+| New corpus entries | 252 |
+| Final corpus entries | 262 |
+| Favored corpus entries | 55 |
+| Pending entries at stop | 134 |
+| Completed queue cycles | 1 |
+| AFL++ bitmap coverage | 4.61% |
+| Instrumented edges found | 957 of 20,750 |
+| Stability | 100.00% |
+| Timeout events (`total_tmout`) | 34 |
+| Effective timeout (`exec_timeout`) | 5 ms |
+| Saved crashes | 0 |
+| Saved hangs | 0 |
+
+AFL++ reported `Time limit was reached`, wrote `fastresume.bin`, and exited normally. The external watchdog did not terminate the process.
+
+**Timeout qualification:** Although the command requested `-t 1000+`, AFL++ printed that it would use a 5 ms execution timeout, and `fuzzer_stats` confirms `exec_timeout: 5`. The effective timeout was therefore 5 ms, not one second. The 34 timeout events did not result in saved unique hang findings.
+
+**Coverage qualification:** `bitmap_cvg: 4.61%` is AFL++'s bitmap coverage metric, not a percentage of libpng source lines, functions or branches. The campaign stopped with 134 queue entries pending. Its generated-input maximum was 1 MiB, below the harness's 8 MiB input cap. The separate oversized-input test remains the evidence for the 8 MiB boundary.
+
+### Campaign artifacts
+
+- Seeds: `~/kekkai-work/fuzzing/libpng-1.6.59/seeds-20261105`
+- AFL++ output: `~/kekkai-work/fuzzing/libpng-1.6.59/out-smoke-5m-20261105-retry1`
+- Statistics: `~/kekkai-work/fuzzing/libpng-1.6.59/out-smoke-5m-20261105-retry1/default/fuzzer_stats`
+- Console log: `~/kekkai-work/fuzzing/libpng-1.6.59/campaign-smoke-5m-retry1.log`
+
+## Retained AFL++ corpus — ASan+UBSan replay — 2026-11-05
+
+After the bounded AFL++ campaign completed, all 262 regular `id:*` files in the retained queue were replayed individually against the separate ASan+UBSan-instrumented libpng library and harness.
+
+### Replay configuration
+
+```text
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+Per-input external timeout: 5 seconds
+```
+
+### Results
+
+| Metric | Result |
+|---|---:|
+| Retained queue inputs | 262 |
+| Clean exit status 0 | 262 |
+| Non-zero exits | 0 |
+| Replay timeouts | 0 |
+| Unexpected output | 0 |
+| Anomalies | 0 |
+
+**Result: 262/262 retained queue inputs passed.** No AddressSanitizer, LeakSanitizer or UndefinedBehaviorSanitizer diagnostic was captured. The replay anomaly directory remained empty.
+
+This result applies to the 262 retained queue entries only. It does not represent sanitizer execution of all 280,452 fuzzing executions or every mutation generated during the campaign. It is an additional diagnostic check, not proof of vulnerability absence. System zlib was not rebuilt with sanitizers and remains outside this instrumentation result.
+
+### Replay evidence
+
+- Replay report: `~/kekkai-work/verification/libpng-harness/afl-corpus-asan-ubsan-20261105/results.tsv`
+- Anomaly directory: `~/kekkai-work/verification/libpng-harness/afl-corpus-asan-ubsan-20261105/anomalies`

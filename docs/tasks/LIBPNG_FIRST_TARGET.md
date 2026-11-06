@@ -1,12 +1,12 @@
 # First Target Integration — libpng 1.6.59
 
-**Status:** In progress — baseline, AFL++ instrumentation, corrected harness source review, 12-input ASan+UBSan replay, resource-limit tests and final coverage regression passed; bounded smoke-campaign parameters still require project-owner approval  
+**Status:** First-target pilot execution completed through the bounded AFL++ smoke campaign and retained-corpus ASan+UBSan replay on 2026-11-05. The run saved no crashes or hangs, and all 262 retained queue entries passed sanitizer replay. The effective AFL++ execution timeout was 5 ms; this is a bounded pilot result, not evidence of vulnerability absence.
 **Base branch:** `development`  
 **Task branch:** `feature/libpng-first-target`  
 **Target:** libpng 1.6.59  
 **Approval:** 2026-11-04
 
-This document defines the first bounded target-integration task. It does not claim that libpng support, a harness, or a fuzzing campaign already exists.
+This document records the first bounded target-integration task for libpng 1.6.59, from its original scope through implementation and pilot verification.
 
 ## 1. Goal
 
@@ -64,7 +64,7 @@ The archive checksum was verified after download and again before extraction. Th
 - CASR integration, database implementation, dashboard or AI features.
 - Claiming that any observed crash is a vulnerability without investigation.
 
-A short, bounded smoke campaign may be run only after all harness-validation gates pass. A sustained campaign is a separate task.
+The initial bounded smoke campaign was run only after all harness-validation gates passed. Any sustained fuzzing campaign remains a separate task.
 
 ## 4. Build profiles
 
@@ -242,7 +242,7 @@ The separate diagnostic profile rebuilt all 17 libpng C translation units with A
 
 The defined 12-input diagnostic corpus passed: valid and Adam7 PNGs; malformed, truncated and empty inputs; width, height and total-pixel limit cases; the exact 64 KiB row boundary; both ancillary chunk-limit cases; and the over-8-MiB input. Every process exited with status 0 and no ASan, LeakSanitizer or UBSan diagnostic was detected. Detailed commands, configuration and outcomes are in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
 
-The source-review and defined validation gates for the corrected harness are now closed. The corrected source removes the shared row-buffer implementation for Adam7 and classifies fatal libpng allocation failures in the error callback. The 12-input ASan+UBSan replay, both chunk-limit warning checks and final five-input AFL++ coverage comparison passed. The exact results and the allocation-failure fault-injection limitation are recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`. This does not prove absence of defects or instrument system zlib. A short bounded AFL++ smoke campaign is a separate next step requiring explicit project-owner approval of duration, memory cap, WSL resource availability and stop conditions. No campaign has started.
+The source-review and defined validation gates for the corrected harness were closed at the time of this update. The corrected source removes the shared row-buffer implementation for Adam7 and classifies fatal libpng allocation failures in the error callback. The 12-input ASan+UBSan replay, both chunk-limit warning checks and final five-input AFL++ coverage comparison passed. The subsequent bounded campaign and retained-corpus replay are documented in Section 12 and `LIBPNG_AFL_BUILD_VERIFICATION.md`. This does not prove absence of defects or instrument system zlib.
 
 
 ## 11. Corrected harness verification closure — 2026-11-05
@@ -251,4 +251,32 @@ Final source review led to two narrow corrections. The harness now passes NULL r
 
 The latest AFL++, baseline-control and ASan+UBSan harness executables were rebuilt. The corrected 12-input ASan+UBSan replay passed without sanitizer diagnostics. The five-input coverage comparison passed for valid, empty, malformed, truncated and Adam7 files; the corrected Adam7 coverage map was byte-identical on repeat. Both ancillary chunk-limit warnings were preserved. The exact counts, hash and log paths are recorded in `LIBPNG_AFL_BUILD_VERIFICATION.md`.
 
-A forced allocation-failure test was not performed; this classification is source-reviewed but not fault-injection-tested. The defined harness source-review and regression gates are closed. A bounded smoke campaign remains unstarted pending explicit approval of its time, memory and stop parameters.
+A forced allocation-failure test was not performed; this classification is source-reviewed but not fault-injection-tested. At this verification-closure checkpoint, the defined harness source-review and regression gates were closed, while the bounded smoke campaign had not yet started. It was subsequently approved and executed, as recorded in Section 12.
+
+## 12. Bounded AFL++ campaign and retained-corpus sanitizer replay — 2026-11-05
+
+The first owner-approved five-minute AFL++ smoke campaign against libpng 1.6.59 completed normally.
+
+| Metric | Result |
+|---|---:|
+| AFL++ version | 4.33c |
+| Runtime | 300 seconds |
+| Active fuzz time | 276 seconds |
+| Executions | 280,452 |
+| Average executions/sec | 934.78 |
+| New corpus entries | 252 |
+| Final corpus entries | 262 |
+| AFL++ bitmap coverage | 4.61% (957 / 20,750 edges) |
+| Stability | 100% |
+| Timeout events | 34 |
+| Effective execution timeout | 5 ms |
+| Saved crashes / hangs | 0 / 0 |
+| Pending queue entries at stop | 134 |
+
+Although the command requested `-t 1000+`, AFL++ selected and recorded a 5 ms effective timeout. The campaign therefore did not run with a one-second timeout. AFL++ generated inputs up to 1 MiB, below the harness input cap of 8 MiB. The 4.61% value is AFL++ bitmap coverage, not source-code coverage.
+
+All 262 retained queue entries were replayed individually against the separate ASan+UBSan build. All 262 exited with status 0; no sanitizer diagnostics, unexpected output, replay timeouts or anomalies were recorded.
+
+The replay covers retained queue entries only, not all 280,452 fuzzing executions. System zlib was not instrumented, and forced allocation-failure testing remains outstanding. These bounded results do not establish absence of vulnerabilities.
+
+See `LIBPNG_AFL_BUILD_VERIFICATION.md` for full campaign statistics, configuration, replay settings and evidence paths.
