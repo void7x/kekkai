@@ -12,7 +12,7 @@ KEKKAI is built around a real, reproducible native fuzzing workflow—not a dash
 6. **Conservative interpretation:** a crash is not automatically a defect or vulnerability.
 7. **Local-first and modular:** optional integrations must not block the core engine.
 
-This is an intended architecture. The modules are not yet implemented.
+This is the intended architecture, not a claim that every component already exists. The Phase 1 libpng pilot now provides a target-specific C harness and manually verified build, coverage, campaign and replay evidence. The reusable target registry/adapter, build manager, automated harness validator, campaign manager, evidence collector, persistence and reporting components remain unimplemented as KEKKAI platform modules. Phase 2 begins by making the validated libpng workflow repeatable.
 
 ## 2. System data flow
 
@@ -75,7 +75,7 @@ An adapter describes one supported target:
 - instrumentation/sanitizer options;
 - resource limits and expected execution behavior.
 
-Keep the interface minimal until a second target proves which details are truly reusable. The pilot adapter is for libpng, conditional on feasibility.
+Keep the interface minimal until a second target proves which details are truly reusable. The completed libpng pilot currently consists of a target-specific harness and recorded manual build/campaign configuration; it is not yet an implemented reusable adapter or registry entry.
 
 ### 3.3 Source inspection
 
@@ -100,11 +100,15 @@ Before launching a long campaign, run an explicit validation stage:
 
 The validation report should explain which checks passed, failed or were not applicable. It must not pretend that a single metric proves harness quality.
 
+The libpng pilot's checks were performed and recorded as manual verification steps. The reusable automated validation component described here is Phase 2 work and has not yet been implemented.
+
 ### 3.6 Fuzzing campaign manager
 
 Runs AFL++ through a safe process layer. It validates adapter paths and arguments, uses argument arrays rather than shell-concatenated commands, sets a controlled working directory and captures environment/log/exit details. It supports explicit campaign duration and resource limits. A failed or interrupted campaign remains distinguishable from a successful campaign.
 
 Start with a simple AFL++ mode. Consider parallel workers, dictionaries, corpus minimization and persistent mode only when a use case and correctness test justify them. Persistent mode requires reliable state reset; speed alone is not sufficient.
+
+**Current implementation status:** KEKKAI does not yet have this campaign-manager component. The Phase 1 libpng smoke campaign was launched manually with AFL++. Phase 2 will implement a single-worker runner using validated configuration, safe subprocess argument arrays, explicit resource limits, logs and post-run statistics. It must distinguish fixed timeout from AFL++ adaptive timeout and verify the effective timeout actually selected.
 
 ### 3.7 Evidence collector and artifact store
 
@@ -187,6 +191,6 @@ The schema should be implemented only when the fields have a demonstrated use. P
 
 ## 6. Implementation boundary
 
-The first milestone is one target, one meaningful harness, one instrumented build and one bounded campaign. Do not build the dashboard, broad source analyser, automatic harness generator, distributed system or AI service before this path works.
+The Phase 1 proof of work now exists for one target: libpng 1.6.59, with one manually reviewed harness, instrumented build, bounded smoke campaign and retained-corpus sanitizer replay. The next milestone is to turn that manual path into a validated, repeatable single-target orchestration workflow. Do not build the dashboard, broad source analyser, automatic harness generator, distributed system or AI service before the core workflow is reliable.
 
 Create abstractions only when they reduce actual duplication or make a tested responsibility clearer.
