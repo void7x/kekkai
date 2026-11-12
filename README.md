@@ -6,7 +6,7 @@ KEKKAI is a local-first research platform for discovering, reproducing and inves
 
 Its defining capability is **evidence-driven, version-aware investigation**: a crash is preserved with the exact experiment that produced it, replayed for confirmation, and checked against other recorded software versions. KEKKAI reports what the evidence supports; it does not turn every crash into a claimed vulnerability.
 
-> **Current status:** Documentation and development-environment setup. No fuzzing engine, target adapter, database, dashboard or AI integration is claimed as implemented.
+> **Current status:** Phase 0 is complete, and the Phase 1 libpng 1.6.59 pilot has completed its manual target-integration work. A target-specific C harness, baseline build, AFL++ instrumentation and coverage checks are verified. One five-minute smoke campaign completed 280,452 executions, and all 262 retained corpus entries passed separate ASan+UBSan replay. Important limitation: AFL++ selected a 5 ms effective timeout despite the requested `-t 1000+`; this is a bounded pilot result, not evidence of vulnerability absence. The reusable target-adapter configuration, automated harness validation, campaign manager, crash-evidence database, dashboard and AI integration are not yet implemented as KEKKAI components.
 
 ## Locked project direction
 
@@ -14,7 +14,9 @@ The engineering workflow is recorded in [Workflow and Technology Decisions](docs
 
 ### Initial target
 
-The first proof of work will use **libpng**, provided the selected release can be built and instrumented reliably and a meaningful harness can be validated. Before a campaign, we will pin its exact source release or commit. If feasibility checks fail, we will document the blocker and evaluate one alternative rather than pretending support works.
+The first proof-of-work target, **libpng 1.6.59**, has completed its manual integration pilot. The pinned source, target-specific C harness, baseline and instrumented builds, coverage checks, bounded smoke campaign and retained-corpus sanitizer replay are documented under `docs/tasks/`.
+
+This pilot is not yet a reusable KEKKAI target adapter or automated campaign runner. Those are Phase 2 work. The previous smoke campaign's effective timeout was 5 ms, so a future campaign that requires a one-second fixed timeout must use and verify the fixed-timeout configuration rather than assuming `-t 1000+` means 1,000 ms.
 
 ### Core workflow
 

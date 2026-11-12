@@ -53,8 +53,8 @@ ctest --test-dir "$HOME/kekkai-work/builds/libpng-1.6.59-baseline" --output-on-f
 
 **37/37 passed; 0 failed; 0 skipped shown.** Total CTest time: 83.82 seconds.
 
-This verifies the normal baseline build and its configured upstream test suite in the current WSL 2 environment. It does not yet verify AFL++ instrumentation, the KEKKAI harness, sanitizer behavior in the target integration, or any fuzzing campaign.
+At the time of this baseline checkpoint, AFL++ instrumentation, the KEKKAI harness, sanitizer behavior and fuzzing had not yet been verified. Their subsequent verification is recorded in the first-target pilot follow-through.
 
-## Next gate
+## First-target pilot follow-through
 
-Configure a separate clean AFL++-instrumented build. Inspect and verify its CMake cache, generated feature header, and compiler commands before compiling it. Do not begin a fuzzing campaign until harness validation is complete.
+The separate AFL++-instrumented static-library build, UBSan trap-mode test, corrected harness review, coverage comparison, resource-limit checks and 12-input ASan+UBSan diagnostic replay passed. A subsequent owner-approved five-minute AFL++ smoke campaign completed with 280,452 executions, 252 new corpus entries, zero saved crashes and zero saved hangs. AFL++ selected a 5 ms effective execution timeout and recorded 34 timeout events. All 262 retained queue entries passed separate ASan+UBSan replay. The bounded campaign does not establish absence of defects; forced allocation-failure injection remains untested, and system zlib was not instrumented. See `LIBPNG_AFL_BUILD_VERIFICATION.md` for details.

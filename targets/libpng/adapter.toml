@@ -1,0 +1,28 @@
+schema_version = 2
+
+[target]
+name = "libpng"
+version = "1.6.59"
+source_dir = "../kekkai-work/downloads/libpng-1.6.59"
+harness_source = "targets/libpng/png_read_harness.c"
+harness_binary = "../kekkai-work/builds/libpng-1.6.59-afl-ubsan-phase2-clean/kekkai_png_harness"
+seed_dir = "../kekkai-work/fuzzing/libpng-1.6.59/seeds-20261105"
+output_parent = "../kekkai-work/fuzzing/libpng-1.6.59"
+
+[fuzzer]
+executable = "afl-fuzz"
+expected_version = "4.33c"
+
+[limits]
+duration_seconds = 300
+memory_mib = 512
+timeout_ms = 1000
+max_input_bytes = 8388608
+
+[build]
+profile = "libpng-afl-ubsan"
+build_dir = "../kekkai-work/builds/libpng-1.6.59-afl-ubsan-phase2-clean"
+jobs = 2
+timeout_seconds = 900
+memory_mib = 4096
+log_limit_bytes = 16777216
