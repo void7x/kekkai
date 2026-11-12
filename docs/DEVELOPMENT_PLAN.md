@@ -81,23 +81,6 @@ Acceptance:
 - campaign state and logs are traceable;
 - no arbitrary command execution path is introduced.
 
-### Verified progress — 2026-11-11
-
-Implemented and verified:
-- Strict TOML adapter configuration and path validation.
-- Libpng preflight and existing build-provenance checks.
-- Harness smoke validation: 13/13 cases passed.
-- AFL++ coverage validation: 10/10 distinct seed maps.
-- Adam7 coverage repeatability: passed.
-- Single-worker campaign orchestration, metadata, bounded logs, watchdog, process-group cleanup and lifecycle-state handling.
-- AFL++ generated-input argument capped at the installed build's verified 1 MiB maximum; harness input limit remains 8 MiB.
-- Safe integration check: all four validation gates passed with the actual campaign launch blocked.
-- Automated tests: 100/100 passed.
-
-The first live orchestrator launch failed before fuzzing because the configured AFL++ `-G` value exceeded the installed tool's maximum. The command builder has since been corrected and reverified. A successful 300-second live campaign and 338-input sanitizer replay were completed on 2026-11-11.
-
-**Phase 2 is complete for the libpng 1.6.59 adapter.** The clean build, four validation gates, live campaign and retained-corpus sanitizer replay passed. See the Phase 2 verification report for evidence and limitations.
-
 ## Phase 3 — Crash evidence, reproduction and persistence
 
 **Goal:** Make every interesting observation reviewable and recoverable.
