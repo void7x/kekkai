@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.build.source_identity import SourceIdentity, verify_libpng_source_identity
 
 
 class BuildError(RuntimeError):
@@ -26,6 +27,9 @@ class BuildPlan:
     build_dir: Path
     steps: tuple[BuildStep, ...]
     environment: tuple[tuple[str, str], ...]
+    source_archive_path: Path | None = None
+    source_archive_sha256: str | None = None
+    source_tree_sha256: str | None = None
 
 
 _PROFILE = "libpng-afl-ubsan"
@@ -72,7 +76,7 @@ def _require_executable(path: Path, label: str) -> str:
     return str(path)
 
 
-def _validate_source(config: AdapterConfig, root: Path) -> Path:
+def _validate_source(config: AdapterConfig, root: Path) -> tuple[Path, SourceIdentity]:
     if config.target.name.casefold() != "libpng":
         raise BuildError("The approved build profile supports only libpng.")
     if config.target.version != _TARGET_VERSION:
@@ -100,6 +104,13 @@ def _validate_source(config: AdapterConfig, root: Path) -> Path:
             f"observed {match.group(1) if match else 'unknown'}."
         )
 
+    try:
+        source_identity = verify_libpng_source_identity(
+            source, config.target.source_archive
+        )
+    except (OSError, ValueError) as exc:
+        raise BuildError(f"Source authentication failed: {exc}") from exc
+
     harness_path = config.target.harness_source
     if harness_path.is_symlink() or not harness_path.is_file():
         raise BuildError("Harness source is not a regular file.")
@@ -113,7 +124,7 @@ def _validate_source(config: AdapterConfig, root: Path) -> Path:
     if digest != _HARNESS_SHA256:
         raise BuildError(f"Harness source hash differs from the reviewed source: {digest}")
 
-    return source
+    return source, source_identity
 
 
 def build_command_plan(
@@ -128,7 +139,7 @@ def build_command_plan(
 
     try:
         root = Path(project_root).expanduser().resolve(strict=True)
-        source = _validate_source(config, root)
+        source, source_identity = _validate_source(config, root)
         build_dir = config.build.build_dir
         parent = build_dir.parent.resolve(strict=True)
         output_parent = config.target.output_parent.resolve(strict=True)
@@ -242,4 +253,7 @@ def build_command_plan(
             ("AFL_USE_UBSAN", "1"),
             ("AFL_DEBUG", "1"),
         ),
+        source_archive_path=config.target.source_archive,
+        source_archive_sha256=source_identity.archive_sha256,
+        source_tree_sha256=source_identity.tree_sha256,
     )

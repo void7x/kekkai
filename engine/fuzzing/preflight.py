@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.processes import run_process_group
+from engine.storage import StorageError, verify_campaign_storage
 
 
 _MAX_SEED_ENTRIES = 4096
@@ -495,6 +497,32 @@ def validate_adapter(
             "source tree and has write/search access.",
         )
 
+    # Schema 4 requires the exact dedicated ext4 campaign volume.
+    if config.schema_version >= 4:
+        try:
+            if target.campaign_storage_image is None or not target.campaign_storage_uuid:
+                raise StorageError("Adapter does not pin the campaign storage image and UUID.")
+            storage = verify_campaign_storage(
+                target.campaign_storage_image,
+                target.campaign_storage_uuid,
+                target.output_parent,
+            )
+        except StorageError as exc:
+            add("campaign_storage", "failed", str(exc))
+        else:
+            add(
+                "campaign_storage",
+                "passed",
+                f"Authenticated ext4 volume {storage.filesystem_uuid} at "
+                f"{storage.mountpoint}; {storage.available_bytes} bytes available.",
+            )
+    else:
+        add(
+            "campaign_storage",
+            "not_run",
+            "Legacy in-memory adapter configuration; schema 4 enforces the dedicated campaign volume.",
+        )
+
     # Only the fixed AFL++ command is allowed. Adapter TOML must not
     # become a general-purpose executable or command specification.
     if config.fuzzer.executable != "afl-fuzz":
@@ -509,7 +537,7 @@ def validate_adapter(
             "The configured executable is not the approved AFL++ command.",
         )
     else:
-        fuzzer_path = shutil.which("afl-fuzz")
+        fuzzer_path = shutil.which("afl-fuzz", path=os.defpath)
 
         if fuzzer_path is None:
             add(
@@ -530,13 +558,14 @@ def validate_adapter(
                     tempfile.TemporaryFile(mode="w+b") as stdout_file,
                     tempfile.TemporaryFile(mode="w+b") as stderr_file,
                 ):
-                    result = subprocess.run(
+                    result = run_process_group(
                         [str(resolved_fuzzer), "--version"],
                         cwd=root,
                         stdin=subprocess.DEVNULL,
                         stdout=stdout_file,
                         stderr=stderr_file,
                         timeout=5,
+                        env={"PATH": os.defpath, "LC_ALL": "C"},
                         check=False,
                         shell=False,
                         preexec_fn=_fuzzer_output_limit_callback(

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import struct
 import tempfile
 import unittest
+import zlib
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,91 @@ from engine.fuzzing.smoke import (
     LIBPNG_SEED_CASES,
     run_harness_smoke,
 )
+
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_ADAM7_TEST_PASSES = (
+    (0, 0, 8, 8),
+    (4, 0, 8, 8),
+    (0, 4, 4, 8),
+    (2, 0, 4, 4),
+    (0, 2, 2, 4),
+    (1, 0, 2, 2),
+    (0, 1, 1, 2),
+)
+
+
+def _test_png_chunk(kind: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(kind + payload) & 0xffffffff
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+
+def _test_png_image_data(
+    width: int,
+    height: int,
+    bit_depth: int,
+    color_type: int,
+    interlace: int,
+) -> bytes:
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+    bits_per_pixel = channels * bit_depth
+    passes = _ADAM7_TEST_PASSES if interlace else ((0, 0, 1, 1),)
+    raw = bytearray()
+
+    for x_start, y_start, x_step, y_step in passes:
+        pass_width = (
+            (width - x_start + x_step - 1) // x_step
+            if width > x_start else 0
+        )
+        pass_height = (
+            (height - y_start + y_step - 1) // y_step
+            if height > y_start else 0
+        )
+        if not pass_width or not pass_height:
+            continue
+
+        row_bytes = (pass_width * bits_per_pixel + 7) // 8
+        for _ in range(pass_height):
+            raw.append(0)
+            raw.extend(bytes(row_bytes))
+
+    return zlib.compress(bytes(raw))
+
+
+def _make_test_png(
+    *,
+    width: int = 1,
+    height: int = 1,
+    bit_depth: int = 8,
+    color_type: int = 6,
+    interlace: int = 0,
+    text_payloads: tuple[bytes, ...] = (),
+    include_iend: bool = True,
+    valid_image_data: bool = True,
+) -> bytes:
+    ihdr = struct.pack(
+        ">IIBBBBB",
+        width, height, bit_depth, color_type, 0, 0, interlace,
+    )
+    data = bytearray(_PNG_SIGNATURE + _test_png_chunk(b"IHDR", ihdr))
+
+    for payload in text_payloads:
+        data.extend(_test_png_chunk(b"tEXt", payload))
+
+    if valid_image_data:
+        image_data = _test_png_image_data(
+            width, height, bit_depth, color_type, interlace
+        )
+    else:
+        image_data = zlib.compress(b"")
+
+    data.extend(_test_png_chunk(b"IDAT", image_data))
+
+    if include_iend:
+        data.extend(_test_png_chunk(b"IEND", b""))
+
+    return bytes(data)
 
 
 class HarnessSmokeTests(unittest.TestCase):
@@ -50,8 +137,38 @@ class HarnessSmokeTests(unittest.TestCase):
         self.seed_dir = self.workspace / "seeds"
         self.seed_dir.mkdir()
 
+        fixtures = {
+            "valid.png": _make_test_png(),
+            "adam7.png": _make_test_png(
+                width=8, height=8, interlace=1
+            ),
+            "malformed.png": b"not a png file!!",
+            "truncated.png": _make_test_png(include_iend=False),
+            "width_over_limit.png": _make_test_png(
+                width=8193, valid_image_data=False
+            ),
+            "height_over_limit.png": _make_test_png(
+                height=8193, valid_image_data=False
+            ),
+            "pixels_over_limit.png": _make_test_png(
+                width=8192, height=2048, valid_image_data=False
+            ),
+            "row_boundary_64k.png": _make_test_png(
+                width=8192, height=1, bit_depth=16
+            ),
+            "chunk_over_limit.png": _make_test_png(
+                text_payloads=(b"Comment\\0" + b"x" * (262145 - 8),)
+            ),
+            "chunk_cache_over_limit.png": _make_test_png(
+                text_payloads=tuple(
+                    f"K{i:03d}".encode("ascii") + b"\\0v"
+                    for i in range(130)
+                )
+            ),
+        }
+
         for _, filename in LIBPNG_SEED_CASES:
-            (self.seed_dir / filename).write_bytes(b"test-seed")
+            (self.seed_dir / filename).write_bytes(fixtures[filename])
 
         output_parent = self.workspace / "output"
         output_parent.mkdir()
@@ -101,13 +218,55 @@ class HarnessSmokeTests(unittest.TestCase):
                 return_value=1000,
             ),
             patch(
-                "engine.fuzzing.smoke.subprocess.run",
+                "engine.fuzzing.smoke.run_process_group",
                 side_effect=process,
             ) as mocked_run,
         ):
             report = run_harness_smoke(self.config, self.root)
 
         return report, mocked_run
+
+    def test_rejects_png_decompression_bomb(self) -> None:
+        from engine.fuzzing.smoke import _validate_png_image_data
+
+        compressed = zlib.compress(b"\x00" + b"A" * (1024 * 1024))
+        chunks = ((b"IDAT", compressed),)
+        ihdr = (1, 1, 8, 6, 0, 0, 0)
+
+        with self.assertRaisesRegex(ValueError, "beyond the decompressed size"):
+            _validate_png_image_data(ihdr, chunks)
+
+    def test_rejects_fixture_with_wrong_semantic_metadata(self) -> None:
+        (self.seed_dir / "adam7.png").write_bytes(
+            _make_test_png(width=8, height=8, interlace=0)
+        )
+
+        report, mocked_run = self.run_smoke_with_fake_process()
+        adam7 = next(
+            result for result in report.results if result.name == "adam7_png"
+        )
+
+        self.assertFalse(report.passed)
+        self.assertEqual(adam7.status, "failed")
+        self.assertIn("semantic validation failed", adam7.message)
+        self.assertEqual(mocked_run.call_count, 12)
+
+    def test_rejects_fixture_with_invalid_chunk_crc(self) -> None:
+        path = self.seed_dir / "valid.png"
+        damaged = bytearray(path.read_bytes())
+        idat_offset = damaged.index(b"IDAT")
+        damaged[idat_offset + 4] ^= 0x01
+        path.write_bytes(damaged)
+
+        report, mocked_run = self.run_smoke_with_fake_process()
+        valid = next(
+            result for result in report.results if result.name == "valid_png"
+        )
+
+        self.assertFalse(report.passed)
+        self.assertEqual(valid.status, "failed")
+        self.assertIn("CRC mismatch", valid.message)
+        self.assertEqual(mocked_run.call_count, 12)
 
     def test_valid_smoke_run_executes_all_expected_cases(self) -> None:
         report, mocked_run = self.run_smoke_with_fake_process()
@@ -237,7 +396,7 @@ class HarnessSmokeTests(unittest.TestCase):
                 "engine.fuzzing.smoke.tempfile.gettempdir",
                 return_value=str(unsafe_temp),
             ),
-            patch("engine.fuzzing.smoke.subprocess.run") as process,
+            patch("engine.fuzzing.smoke.run_process_group") as process,
         ):
             with self.assertRaises(HarnessSmokeError):
                 run_harness_smoke(self.config, self.root)
@@ -301,7 +460,7 @@ class HarnessSmokeTests(unittest.TestCase):
                 "engine.fuzzing.smoke.os.geteuid",
                 return_value=0,
             ),
-            patch("engine.fuzzing.smoke.subprocess.run") as mocked_run,
+            patch("engine.fuzzing.smoke.run_process_group") as mocked_run,
         ):
             with self.assertRaises(HarnessSmokeError):
                 run_harness_smoke(self.config, self.root)

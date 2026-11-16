@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import math
 import os
+import struct
 import subprocess
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.processes import run_process_group
 
 
 class HarnessSmokeError(RuntimeError):
@@ -98,6 +101,297 @@ LIBPNG_SEED_CASES = (
 
 _MAX_CAPTURE_BYTES = 16 * 1024
 _MAX_OUTPUT_FILE_BYTES = 64 * 1024
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_MAX_IMAGE_WIDTH = 8192
+_MAX_IMAGE_HEIGHT = 8192
+_MAX_TOTAL_PIXELS = 16_000_000
+_MAX_ROW_BYTES = 64 * 1024
+_MAX_CHUNK_BYTES = 256 * 1024
+_MAX_CACHED_CHUNKS = 128
+_MAX_PNG_DECOMPRESSED_BYTES = 128 * 1024 * 1024
+_PNG_DECOMPRESS_INPUT_CHUNK_BYTES = 64 * 1024
+_PNG_DECOMPRESS_OUTPUT_CHUNK_BYTES = 64 * 1024
+
+
+def _inspect_png_fixture(
+    data: bytes,
+) -> tuple[tuple[int, ...], tuple[tuple[bytes, bytes], ...], bool]:
+    """Parse PNG chunk boundaries and CRCs without trusting the filename."""
+    if not data.startswith(_PNG_SIGNATURE):
+        raise ValueError("PNG signature is invalid.")
+
+    offset = len(_PNG_SIGNATURE)
+    chunks: list[tuple[bytes, bytes]] = []
+    has_iend = False
+
+    while offset < len(data):
+        remaining = len(data) - offset
+        if remaining < 12:
+            raise ValueError("PNG ends inside a chunk header or CRC.")
+
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+
+        if length > remaining - 12:
+            raise ValueError(f"PNG {kind!r} chunk exceeds the remaining file.")
+
+        payload_start = offset + 8
+        payload_end = payload_start + length
+        chunk_end = payload_end + 4
+
+        payload = data[payload_start:payload_end]
+        expected_crc = struct.unpack(">I", data[payload_end:chunk_end])[0]
+        actual_crc = zlib.crc32(data[offset + 4:payload_end]) & 0xffffffff
+
+        if actual_crc != expected_crc:
+            raise ValueError(f"PNG {kind.decode('ascii', 'replace')} CRC mismatch.")
+
+        chunks.append((kind, payload))
+        offset = chunk_end
+
+        if kind == b"IEND":
+            if length != 0:
+                raise ValueError("PNG IEND chunk must be empty.")
+            has_iend = True
+            break
+
+    if has_iend and offset != len(data):
+        raise ValueError("PNG contains trailing bytes after IEND.")
+
+    if not chunks or chunks[0][0] != b"IHDR" or len(chunks[0][1]) != 13:
+        raise ValueError("PNG must begin with exactly one valid IHDR chunk.")
+
+    if sum(kind == b"IHDR" for kind, _ in chunks) != 1:
+        raise ValueError("PNG must contain exactly one IHDR chunk.")
+
+    if not any(kind == b"IDAT" for kind, _ in chunks):
+        raise ValueError("PNG has no IDAT image-data chunk.")
+
+    ihdr = struct.unpack(">IIBBBBB", chunks[0][1])
+    return ihdr, tuple(chunks), has_iend
+
+
+def _validate_png_image_data(
+    ihdr: tuple[int, ...],
+    chunks: tuple[tuple[bytes, bytes], ...],
+) -> None:
+    """Validate IDAT with bounded streaming decompression and scanline checks."""
+    width, height, bit_depth, color_type, _, _, interlace = ihdr
+    channels_by_type = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+
+    channels = channels_by_type.get(color_type)
+    if channels is None:
+        raise ValueError("Fixture uses an unsupported PNG color type.")
+    if width <= 0 or height <= 0 or bit_depth not in {1, 2, 4, 8, 16}:
+        raise ValueError("PNG dimensions or bit depth are invalid.")
+    if width > _MAX_IMAGE_WIDTH or height > _MAX_IMAGE_HEIGHT:
+        raise ValueError("PNG dimensions exceed the configured harness limits.")
+    if width * height > _MAX_TOTAL_PIXELS:
+        raise ValueError("PNG dimensions exceed the configured total-pixel limit.")
+
+    bits_per_pixel = channels * bit_depth
+    if interlace == 0:
+        passes = ((0, 0, 1, 1),)
+    elif interlace == 1:
+        passes = (
+            (0, 0, 8, 8),
+            (4, 0, 8, 8),
+            (0, 4, 4, 8),
+            (2, 0, 4, 4),
+            (0, 2, 2, 4),
+            (1, 0, 2, 2),
+            (0, 1, 1, 2),
+        )
+    else:
+        raise ValueError("PNG interlace method is invalid.")
+
+    # Keep only per-row byte counts, never the complete decompressed image.
+    row_lengths: list[int] = []
+    expected_size = 0
+    for x_start, y_start, x_step, y_step in passes:
+        pass_width = (
+            (width - x_start + x_step - 1) // x_step
+            if width > x_start else 0
+        )
+        pass_height = (
+            (height - y_start + y_step - 1) // y_step
+            if height > y_start else 0
+        )
+        if not pass_width or not pass_height:
+            continue
+
+        row_bytes = (pass_width * bits_per_pixel + 7) // 8
+        row_size = row_bytes + 1  # One filter byte precedes every scanline.
+        expected_size += pass_height * row_size
+        if expected_size > _MAX_PNG_DECOMPRESSED_BYTES:
+            raise ValueError(
+                "PNG expected decompressed image data exceeds the 128 MiB limit."
+            )
+        row_lengths.extend([row_size] * pass_height)
+
+    if not row_lengths:
+        raise ValueError("PNG image has no non-empty scanlines.")
+
+    compressed = b"".join(
+        payload for kind, payload in chunks if kind == b"IDAT"
+    )
+    if not compressed:
+        raise ValueError("PNG has no compressed image data.")
+
+    decoder = zlib.decompressobj()
+    row_index = 0
+    row_remaining = row_lengths[0]
+    filter_pending = True
+    produced_size = 0
+
+    def consume_output(output: bytes) -> None:
+        nonlocal row_index, row_remaining, filter_pending, produced_size
+        if not output:
+            return
+        produced_size += len(output)
+        if produced_size > expected_size:
+            raise ValueError(
+                "PNG IDAT expands beyond the decompressed size required by IHDR."
+            )
+
+        offset = 0
+        while offset < len(output):
+            if row_index >= len(row_lengths):
+                raise ValueError("PNG image data contains extra scanline bytes.")
+
+            available = len(output) - offset
+            consumed = min(row_remaining, available)
+            if filter_pending:
+                filter_type = output[offset]
+                if filter_type > 4:
+                    raise ValueError(f"Invalid PNG filter type: {filter_type}.")
+                filter_pending = False
+
+            offset += consumed
+            row_remaining -= consumed
+            if row_remaining == 0:
+                row_index += 1
+                if row_index < len(row_lengths):
+                    row_remaining = row_lengths[row_index]
+                    filter_pending = True
+
+    def feed_compressed(data: bytes) -> None:
+        pending = data
+        while pending:
+            previous_pending_size = len(pending)
+            try:
+                output = decoder.decompress(
+                    pending, _PNG_DECOMPRESS_OUTPUT_CHUNK_BYTES
+                )
+            except zlib.error as exc:
+                raise ValueError(
+                    f"PNG IDAT data is not valid zlib data: {exc}"
+                ) from exc
+            consume_output(output)
+            pending = decoder.unconsumed_tail
+            if pending and len(pending) == previous_pending_size and not output:
+                raise ValueError("PNG decompressor made no progress.")
+
+    for offset in range(0, len(compressed), _PNG_DECOMPRESS_INPUT_CHUNK_BYTES):
+        feed_compressed(
+            compressed[offset:offset + _PNG_DECOMPRESS_INPUT_CHUNK_BYTES]
+        )
+
+    # Drain output buffered internally by zlib without allowing an unbounded
+    # allocation. A fixed output size is enforced on every decompressor call.
+    while True:
+        try:
+            output = decoder.decompress(b"", _PNG_DECOMPRESS_OUTPUT_CHUNK_BYTES)
+        except zlib.error as exc:
+            raise ValueError(f"PNG IDAT decompression failed: {exc}") from exc
+        if not output:
+            break
+        consume_output(output)
+
+    if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        raise ValueError("PNG IDAT zlib stream is incomplete or has trailing data.")
+    if produced_size != expected_size or row_index != len(row_lengths):
+        raise ValueError("PNG image data has an unexpected decompressed length.")
+
+def _validate_seed_fixture(case_name: str, path: Path) -> None:
+    """Verify that a named smoke fixture really represents its intended case."""
+    data = path.read_bytes()
+
+    if case_name == "malformed_png":
+        if not data or data.startswith(_PNG_SIGNATURE):
+            raise ValueError("Malformed fixture must have a non-PNG signature.")
+        return
+
+    ihdr, chunks, has_iend = _inspect_png_fixture(data)
+    width, height, bit_depth, color_type, compression, filtering, interlace = ihdr
+    chunk_types = [kind for kind, _ in chunks]
+    text_lengths = [
+        len(payload) for kind, payload in chunks if kind == b"tEXt"
+    ]
+
+    if compression != 0 or filtering != 0:
+        raise ValueError("PNG compression and filter methods must be zero.")
+
+    if case_name == "truncated_png":
+        if ihdr != (1, 1, 8, 6, 0, 0, 0):
+            raise ValueError("Truncated fixture has unexpected IHDR metadata.")
+        if has_iend or chunk_types[-1] != b"IDAT":
+            raise ValueError("Truncated fixture must end after complete IDAT data.")
+        _validate_png_image_data(ihdr, chunks)
+        return
+
+    if not has_iend:
+        raise ValueError("PNG fixture must contain a final IEND chunk.")
+
+    if case_name == "valid_png":
+        if ihdr != (1, 1, 8, 6, 0, 0, 0):
+            raise ValueError("Valid PNG fixture has unexpected IHDR metadata.")
+        _validate_png_image_data(ihdr, chunks)
+
+    elif case_name == "adam7_png":
+        if ihdr != (8, 8, 8, 6, 0, 0, 1):
+            raise ValueError("Adam7 fixture must be an 8x8 interlaced RGBA PNG.")
+        _validate_png_image_data(ihdr, chunks)
+
+    elif case_name == "width_limit":
+        if width <= _MAX_IMAGE_WIDTH:
+            raise ValueError("Width fixture does not exceed the 8192-pixel limit.")
+
+    elif case_name == "height_limit":
+        if height <= _MAX_IMAGE_HEIGHT:
+            raise ValueError("Height fixture does not exceed the 8192-pixel limit.")
+
+    elif case_name == "pixel_limit":
+        if width * height <= _MAX_TOTAL_PIXELS:
+            raise ValueError("Pixel fixture does not exceed the total-pixel limit.")
+
+    elif case_name == "row_boundary":
+        channels_by_type = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+        channels = channels_by_type.get(color_type)
+        if channels is None:
+            raise ValueError("Row-boundary fixture has an unsupported color type.")
+        row_bytes = (width * channels * bit_depth + 7) // 8
+        if row_bytes != _MAX_ROW_BYTES:
+            raise ValueError("Row-boundary fixture must be exactly 64 KiB per row.")
+        if ihdr != (8192, 1, 16, 6, 0, 0, 0):
+            raise ValueError("Row-boundary fixture has unexpected IHDR metadata.")
+        _validate_png_image_data(ihdr, chunks)
+
+    elif case_name == "chunk_allocation_limit":
+        if not text_lengths or max(text_lengths) <= _MAX_CHUNK_BYTES:
+            raise ValueError("Fixture has no tEXt chunk larger than 256 KiB.")
+        _validate_png_image_data(ihdr, chunks)
+
+    elif case_name == "chunk_cache_limit":
+        if len(text_lengths) <= _MAX_CACHED_CHUNKS:
+            raise ValueError("Fixture does not exceed the 128-chunk cache limit.")
+        _validate_png_image_data(ihdr, chunks)
+
+    else:
+        raise ValueError(f"No semantic expectations exist for {case_name!r}.")
+
+
 
 
 def _read_bounded_output(stream) -> str:
@@ -311,7 +605,7 @@ def run_harness_smoke(
         with tempfile.TemporaryFile(mode="w+b") as stdout_file:
             with tempfile.TemporaryFile(mode="w+b") as stderr_file:
                 try:
-                    completed = subprocess.run(
+                    completed = run_process_group(
                         [str(binary), str(input_path)],
                         cwd=root,
                         stdin=subprocess.DEVNULL,
@@ -327,7 +621,7 @@ def run_harness_smoke(
                 except subprocess.TimeoutExpired:
                     failure_message = (
                         f"Exceeded the {timeout_seconds:.2f}s timeout; "
-                        "subprocess.run terminated and reaped the process."
+                        "the complete process group was terminated and reaped."
                     )
                 except OSError as exc:
                     failure_message = (
@@ -395,13 +689,22 @@ def run_harness_smoke(
             )
             continue
 
+        try:
+            _validate_seed_fixture(case_name, input_path)
+        except (OSError, ValueError) as exc:
+            record_unexecuted_failure(
+                case_name,
+                f"Fixture semantic validation failed for {filename}: {exc}",
+            )
+            continue
+
         execute_case(
             case_name,
             input_path,
             expected_exit_code=0,
             purpose=(
-                f"Input was handled without a harness failure "
-                f"({filename}, {input_size} bytes)."
+                f"Fixture semantics verified; input was handled without "
+                f"a harness failure ({filename}, {input_size} bytes)."
             ),
         )
 

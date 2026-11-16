@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -116,6 +118,22 @@ class PreflightTests(unittest.TestCase):
 
     def check(self, report, name: str):
         return next(item for item in report.checks if item.name == name)
+
+    def test_version_probe_uses_minimal_environment(self) -> None:
+        def fake_run(argv, **kwargs):
+            kwargs["stdout"].write(b"afl-fuzz++4.33c\n")
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch.dict(os.environ, {"KEKKAI_TEST_SECRET": "must-not-leak", "LD_PRELOAD": "must-not-leak"}):
+            with patch("engine.fuzzing.preflight.run_process_group", side_effect=fake_run) as run:
+                report = self.run_preflight()
+
+        self.assertTrue(report.passed, report.format())
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(
+            run.call_args.kwargs["env"],
+            {"PATH": os.defpath, "LC_ALL": "C"},
+        )
 
     def test_valid_configuration_passes_required_checks(self) -> None:
         before = sorted(path.name for path in self.output_parent.iterdir())

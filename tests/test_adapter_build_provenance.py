@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,23 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             self.seed_dir, self.output_dir,
         ):
             directory.mkdir(parents=True)
+        (self.source_dir / "png.h").write_text(
+            '#define PNG_LIBPNG_VER_STRING "1.6.59"\n'
+        )
+        self.source_archive = self.base / "libpng-1.6.59.tar.xz"
+        with tarfile.open(self.source_archive, mode="w:xz") as archive:
+            archive.add(self.source_dir, arcname="libpng-1.6.59")
+        self.source_archive_sha256 = hashlib.sha256(
+            self.source_archive.read_bytes()
+        ).hexdigest()
+        with patch(
+            "engine.build.source_identity.LIBPNG_SOURCE_ARCHIVE_SHA256",
+            self.source_archive_sha256,
+        ):
+            from engine.build.source_identity import verify_libpng_source_identity
+            self.source_identity = verify_libpng_source_identity(
+                self.source_dir, self.source_archive
+            )
 
         self.config_path = self.target_dir / "adapter.toml"
         self.config_path.write_text("# test adapter\n")
@@ -107,6 +125,7 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
                 name="libpng",
                 version="1.6.59",
                 source_dir=self.source_dir,
+                source_archive=self.source_archive,
                 harness_source=self.harness_source,
                 harness_binary=self.binary,
                 seed_dir=self.seed_dir,
@@ -129,13 +148,16 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             return hashlib.sha256(path.read_bytes()).hexdigest()
 
         self.metadata = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "completed",
             "target": "libpng",
             "target_version": "1.6.59",
             "profile": "libpng-afl-ubsan",
             "build_dir": str(self.build_dir),
             "adapter_config": str(self.config_path),
+            "source_archive_path": str(self.source_archive),
+            "source_archive_sha256": self.source_identity.archive_sha256,
+            "source_tree_sha256": self.source_identity.tree_sha256,
             "steps": [
                 {
                     "name": name,
@@ -180,6 +202,8 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             return 0, "Ubuntu clang version 21.1.8 (6ubuntu1)\n"
 
         with (
+            patch("engine.build.source_identity.LIBPNG_SOURCE_ARCHIVE_SHA256",
+                  self.source_archive_sha256),
             patch("engine.fuzzing.provenance.shutil.which",
                   return_value="/usr/bin/afl-fuzz"),
             patch("engine.fuzzing.provenance._run_bounded_version",
@@ -202,6 +226,21 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             item for item in report.checks
             if item.name == "harness_binary_sha256"
         )
+        self.assertEqual(check.status, "failed")
+
+    def test_rejects_source_mutation_without_version_change(self):
+        (self.source_dir / "png.c").write_text("/* modified source */\n")
+        report = self.verify()
+        self.assertFalse(report.passed)
+        check = next(item for item in report.checks if item.name == "target_source_identity")
+        self.assertEqual(check.status, "failed")
+
+    def test_rejects_source_identity_metadata_mismatch(self):
+        self.metadata["source_tree_sha256"] = "0" * 64
+        (self.build_dir / "build.json").write_text(json.dumps(self.metadata))
+        report = self.verify()
+        self.assertFalse(report.passed)
+        check = next(item for item in report.checks if item.name == "target_source_identity")
         self.assertEqual(check.status, "failed")
 
     def test_rejects_incomplete_build_state(self):

@@ -15,6 +15,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
+from engine.build.source_identity import verify_libpng_source_identity
+
 
 @dataclass(frozen=True)
 class ProvenanceCheck:
@@ -49,7 +52,7 @@ class ProvenanceReport:
 
 
 _MAX_MANIFEST_BYTES = 64 * 1024
-_MAX_BUILD_FILE_BYTES = 16 * 1024 * 1024
+_MAX_BUILD_FILE_BYTES = MAX_BUILD_ARTIFACT_BYTES
 _MAX_VERSION_OUTPUT_BYTES = 16 * 1024
 
 _REQUIRED_KEYS = {
@@ -159,7 +162,7 @@ def _verify_adapter_build_provenance(
             raise ValueError("Build metadata must be a JSON object.")
 
         identity_valid = (
-            metadata.get("schema_version") == 1
+            metadata.get("schema_version") == 2
             and metadata.get("status") == "completed"
             and metadata.get("target") == "libpng"
             and metadata.get("target_version") == config.target.version
@@ -177,6 +180,30 @@ def _verify_adapter_build_provenance(
         )
         if not identity_valid:
             raise ValueError("Clean build identity verification failed.")
+
+        try:
+            source_identity = verify_libpng_source_identity(
+                config.target.source_dir, config.target.source_archive
+            )
+            expected_archive_path = str(
+                config.target.source_archive.resolve(strict=True)
+            )
+            source_identity_valid = (
+                metadata.get("source_archive_path") == expected_archive_path
+                and metadata.get("source_archive_sha256") == source_identity.archive_sha256
+                and metadata.get("source_tree_sha256") == source_identity.tree_sha256
+            )
+            source_identity_message = (
+                "Pinned archive and extracted source tree match completed build metadata."
+                if source_identity_valid
+                else "Current source identity differs from completed build metadata."
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            source_identity_valid = False
+            source_identity_message = str(exc)
+        add("target_source_identity", source_identity_valid, source_identity_message)
+        if not source_identity_valid:
+            raise ValueError("Target source authentication or build identity verification failed.")
 
         steps = metadata.get("steps")
         expected_steps = ("configure", "library", "harness")
@@ -361,7 +388,7 @@ def _verify_adapter_build_provenance(
             f"Observed {compiler_line!r}.",
         )
 
-        afl_path = shutil.which("afl-fuzz")
+        afl_path = shutil.which("afl-fuzz", path=os.defpath)
         if afl_path is None:
             raise ValueError("Cannot find afl-fuzz on PATH.")
         afl_rc, afl_output = _run_bounded_version(
@@ -588,7 +615,7 @@ def verify_build_provenance(
             f"{manifest['compiler_version']!r}.",
         )
 
-        afl_path = shutil.which("afl-fuzz")
+        afl_path = shutil.which("afl-fuzz", path=os.defpath)
         if afl_path is None:
             raise ValueError("Cannot find afl-fuzz on PATH.")
         afl_rc, afl_output = _run_bounded_version(

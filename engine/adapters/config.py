@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,9 @@ class TargetConfig:
     harness_binary: Path
     seed_dir: Path
     output_parent: Path
+    source_archive: Path | None = None
+    campaign_storage_image: Path | None = None
+    campaign_storage_uuid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,11 +126,29 @@ def _require_integer(
     return value
 
 
+def _reject_symlink_components(path: Path, field: str) -> None:
+    current = Path(path.anchor)
+
+    for part in path.parts[1:]:
+        candidate = current / part
+
+        if part not in ("", ".", "..") and candidate.is_symlink():
+            raise AdapterConfigError(
+                f"Path for '{field}' contains a symlink: {candidate}"
+            )
+
+        current = candidate
+
+
 def _resolve_path(value: str, project_root: Path, field: str) -> Path:
     try:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = project_root / path
+
+        if field in ("target.source_dir", "target.source_archive", "target.campaign_storage_image", "target.output_parent"):
+            _reject_symlink_components(path, field)
+
         return path.resolve(strict=False)
     except (OSError, RuntimeError, ValueError) as exc:
         raise AdapterConfigError(
@@ -183,9 +205,9 @@ def load_adapter_config(
     )
 
     schema_version = document["schema_version"]
-    if type(schema_version) is not int or schema_version != 2:
+    if type(schema_version) is not int or schema_version != 4:
         raise AdapterConfigError(
-            "'schema_version' must be the integer 2."
+            "'schema_version' must be the integer 4; schema 4 requires a pinned source archive and campaign storage image/UUID."
         )
 
     target_table = _require_table(document["target"], "target")
@@ -200,6 +222,9 @@ def load_adapter_config(
             "harness_binary",
             "seed_dir",
             "output_parent",
+            "source_archive",
+            "campaign_storage_image",
+            "campaign_storage_uuid",
         },
     )
 
@@ -231,7 +256,26 @@ def load_adapter_config(
             root,
             "target.output_parent",
         ),
+        source_archive=_resolve_path(
+            _require_string(target_table, "source_archive", "target"),
+            root,
+            "target.source_archive",
+        ),
+        campaign_storage_image=_resolve_path(
+            _require_string(target_table, "campaign_storage_image", "target"),
+            root,
+            "target.campaign_storage_image",
+        ),
+        campaign_storage_uuid=_require_string(
+            target_table, "campaign_storage_uuid", "target"
+        ),
     )
+
+    if re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        target.campaign_storage_uuid or "",
+    ) is None:
+        raise AdapterConfigError("'target.campaign_storage_uuid' must be a canonical UUID.")
 
     fuzzer_table = _require_table(document["fuzzer"], "fuzzer")
     _require_exact_keys(

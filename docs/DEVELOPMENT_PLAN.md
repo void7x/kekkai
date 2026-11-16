@@ -98,6 +98,89 @@ The first live orchestrator launch failed before fuzzing because the configured 
 
 **Phase 2 is complete for the libpng 1.6.59 adapter.** The clean build, four validation gates, live campaign and retained-corpus sanitizer replay passed. See the Phase 2 verification report for evidence and limitations.
 
+## Security remediation verification - 2026-11-12 to 2026-11-16
+
+A follow-up security remediation was implemented on the local
+`fix/phase2-security-remediation` branch. The work strengthens the initial
+libpng 1.6.59 pilot without expanding Phase 2 into the later roadmap phases.
+
+### Latest recorded verification
+
+- Full automated test suite: **143 tests passed, 0 failures, 0 errors**
+  (5.868 seconds).
+- `git diff --check`: passed during the latest working-tree review.
+- Authenticated libpng 1.6.59 clean build completed.
+- Build provenance verification passed, including archive identity,
+  extracted source-tree identity, build configuration and artifact hashes.
+- Preflight passed.
+- Harness smoke validation: 13/13 cases passed.
+- Coverage validation: 10 distinct seed maps; Adam7 repeatability passed.
+- No new live AFL++ campaign was launched during this remediation.
+
+### Security and reliability remediation
+
+- **Source authenticity and provenance:** The exact libpng archive is
+  SHA-256 pinned. Archive entries and the extracted source tree are checked.
+  Build metadata schema version 2 records source identity and artifact hashes.
+- **Process lifecycle:** Shared process-group handling covers timeout,
+  interruption, descendant cleanup and SIGTERM.
+- **SIGTERM integration:** External SIGTERM integration tests for both build
+  and campaign orchestration passed. They verify descendant cleanup and
+  interrupted final metadata.
+- **Root protection:** Public build and campaign entry points reject root
+  execution.
+- **Filesystem and configuration checks:** Symlink and unsafe-path checks,
+  controlled subprocess environments and bounded tool-version probes are
+  implemented.
+- **Artifact limits:** Build and provenance verification share a 16 MiB
+  artifact limit.
+- **Fixture validation:** The current libpng fixtures receive semantic PNG
+  checks, including bounded decompression and CRC validation.
+- **Adapter configuration:** The current adapter configuration schema is
+  version 4.
+
+### Campaign storage and failed-build recovery
+
+- **F-07 storage:** Campaign output is directed to a dedicated ext4 filesystem
+  backed by an exact 4 GiB image. The storage verifier checks the expected
+  filesystem UUID, mountpoint, backing image, ownership, permissions and
+  mount options. This enforces an aggregate filesystem capacity ceiling for
+  the configured pilot storage.
+- **F-08 recovery:** A manual recovery CLI validates eligible failed or
+  interrupted build metadata and archives the build directory
+  non-destructively. It preserves logs and partial outputs and publishes a
+  recovery manifest without overwriting an existing archive.
+
+### Remaining limitations
+
+- Source verification is point-in-time. The source tree remains mutable
+  between verification and compiler reads, so the TOCTOU risk is not fully
+  eliminated.
+- Some path checks remain subject to filesystem race conditions.
+- The 4 GiB storage filesystem does not provide per-campaign reservations or
+  an application-managed minimum-free-space threshold. Full-filesystem
+  failure behavior has not been established through fault injection.
+- Failed-build recovery is a manual archival workflow. Automatic retry,
+  restart and cleanup are not implemented.
+- Tool binaries are version-checked but not cryptographically pinned.
+- Python `preexec_fn` remains a potential deadlock concern in a multithreaded
+  host process.
+- An orchestrator killed with SIGKILL cannot execute its own cleanup handler.
+
+**Assessment:** Functionally complete for the initial libpng 1.6.59 pilot,
+subject to the limitations above and final local closeout checks. This does
+not claim that future KEKKAI capabilities such as crash intelligence,
+cross-version comparison, source intelligence, dashboard or AI assistance
+are implemented.
+
+The remediation remains local to `fix/phase2-security-remediation`. It has
+not been committed, pushed or merged into `development` or `main`. No new
+live fuzzing campaign was started during this remediation.
+
+See [Phase 2 Security Remediation Verification](tasks/PHASE2_SECURITY_REMEDIATION.md)
+for finding-by-finding status, evidence and limitations.
+
+
 ## Phase 3 — Crash evidence, reproduction and persistence
 
 **Goal:** Make every interesting observation reviewable and recoverable.

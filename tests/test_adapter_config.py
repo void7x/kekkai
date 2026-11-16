@@ -13,12 +13,15 @@ from engine.adapters.config import (
 
 
 VALID_TOML = """\
-schema_version = 2
+schema_version = 4
 
 [target]
 name = "libpng"
 version = "1.6.59"
 source_dir = "../kekkai-work/downloads/libpng-1.6.59"
+source_archive = "../kekkai-work/downloads/libpng-1.6.59.tar.xz"
+campaign_storage_image = "../kekkai-work/campaign-quota.ext4"
+campaign_storage_uuid = "e8657221-eb6f-41ca-b087-76912b527e4b"
 harness_source = "targets/libpng/png_read_harness.c"
 harness_binary = "../kekkai-work/builds/libpng-1.6.59-afl-ubsan-phase2-clean/kekkai_png_harness"
 seed_dir = "../kekkai-work/seeds"
@@ -62,7 +65,7 @@ class AdapterConfigTests(unittest.TestCase):
     def test_loads_valid_configuration(self) -> None:
         config = self.load()
 
-        self.assertEqual(config.schema_version, 2)
+        self.assertEqual(config.schema_version, 4)
         self.assertEqual(config.build.profile, "libpng-afl-ubsan")
         self.assertEqual(config.build.jobs, 2)
         self.assertEqual(config.build.timeout_seconds, 900)
@@ -93,16 +96,52 @@ class AdapterConfigTests(unittest.TestCase):
             (self.root / "../kekkai-work/output").resolve(),
         )
 
+    def test_rejects_symlinked_source_directory(self) -> None:
+        actual = self.root / "actual-source"
+        actual.mkdir()
+        link = self.root / "source-link"
+        link.symlink_to(actual, target_is_directory=True)
+
+        content = VALID_TOML.replace(
+            "../kekkai-work/downloads/libpng-1.6.59",
+            "source-link",
+        )
+
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load(content)
+
+    def test_rejects_symlinked_source_archive(self) -> None:
+        actual = self.root / "actual-source.tar.xz"
+        actual.write_bytes(b"test archive")
+        link = self.root / "source-link.tar.xz"
+        link.symlink_to(actual)
+
+        content = VALID_TOML.replace(
+            "../kekkai-work/downloads/libpng-1.6.59.tar.xz",
+            "source-link.tar.xz",
+        )
+
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load(content)
+
     def test_rejects_unsupported_schema_version(self) -> None:
         content = VALID_TOML.replace(
-            "schema_version = 2", "schema_version = 3"
+            "schema_version = 4", "schema_version = 3"
         )
         with self.assertRaisesRegex(AdapterConfigError, "schema_version"):
             self.load(content)
 
+    def test_rejects_missing_source_archive_in_schema_v4(self) -> None:
+        content = VALID_TOML.replace(
+            'source_archive = "../kekkai-work/downloads/libpng-1.6.59.tar.xz"\n',
+            "",
+        )
+        with self.assertRaisesRegex(AdapterConfigError, "missing required keys: source_archive"):
+            self.load(content)
+
     def test_rejects_boolean_schema_version(self) -> None:
         content = VALID_TOML.replace(
-            "schema_version = 2", "schema_version = true"
+            "schema_version = 4", "schema_version = true"
         )
         with self.assertRaisesRegex(AdapterConfigError, "schema_version"):
             self.load(content)

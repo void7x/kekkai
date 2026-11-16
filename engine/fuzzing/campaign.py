@@ -20,8 +20,13 @@ from engine.build.libpng import BuildError
 from engine.build.runner import BuildState, run_libpng_build
 from engine.fuzzing.coverage import validate_coverage
 from engine.fuzzing.preflight import validate_adapter
+from engine.storage import StorageError, verify_campaign_storage
 from engine.fuzzing.provenance import verify_build_provenance
 from engine.fuzzing.smoke import run_harness_smoke
+from engine.processes import (
+    ProcessGroupRegistry, process_group_has_live_members, process_groups_guarded,
+    signal_process_group, stop_process_group,
+)
 
 _AFL_MAX_GENERATED_INPUT_BYTES = 1024 * 1024
 
@@ -177,52 +182,42 @@ def _drain_stream_to_log(stream, log_path: Path, errors: list[str]) -> None:
 
 
 def _signal_campaign_group(process, requested_signal: int) -> None:
-    try:
-        os.killpg(process.pid, requested_signal)
-    except ProcessLookupError:
-        pass
-    except OSError:
-        try:
-            process.send_signal(requested_signal)
-        except ProcessLookupError:
-            pass
+    signal_process_group(process.pid, requested_signal)
 
 
 def _campaign_group_exists(process_id: int) -> bool:
-    """Check whether any process remains in the campaign process group."""
-    try:
-        os.killpg(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    """Check for live (non-zombie) members in the campaign process group."""
+    return process_group_has_live_members(process_id)
 
 
 def _stop_campaign_group(process) -> int | None:
     """Stop the entire campaign process group, even if its leader exits."""
-    escalation = (
-        (signal.SIGINT, _INTERRUPT_GRACE_SECONDS),
-        (signal.SIGTERM, _TERMINATE_GRACE_SECONDS),
-        (signal.SIGKILL, _TERMINATE_GRACE_SECONDS),
+    return stop_process_group(
+        process.pid,
+        process=process,
+        graces=(
+            _INTERRUPT_GRACE_SECONDS,
+            _TERMINATE_GRACE_SECONDS,
+            _TERMINATE_GRACE_SECONDS,
+        ),
     )
 
-    group_alive = _campaign_group_exists(process.pid)
 
-    for requested_signal, grace in escalation:
-        if not group_alive:
-            break
-
-        _signal_campaign_group(process, requested_signal)
-        deadline = time.monotonic() + grace
-
-        while group_alive and time.monotonic() < deadline:
-            process.poll()
-            remaining = deadline - time.monotonic()
-            time.sleep(min(0.05, max(0.0, remaining)))
-            group_alive = _campaign_group_exists(process.pid)
-
-    return process.poll()
+def _require_campaign_storage(config: AdapterConfig) -> None:
+    """Refuse schema-4 campaigns unless the exact pinned volume is mounted."""
+    if config.schema_version < 4:
+        return
+    image = config.target.campaign_storage_image
+    expected_uuid = config.target.campaign_storage_uuid
+    if image is None or not expected_uuid:
+        raise CampaignError("Adapter does not pin campaign storage; campaign was not started.")
+    try:
+        verify_campaign_storage(image, expected_uuid, config.target.output_parent)
+    except StorageError as exc:
+        raise CampaignError(
+            "Campaign storage verification failed; no build or campaign was started.\n"
+            + str(exc)
+        ) from exc
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:
@@ -233,13 +228,17 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     )
 
 
+@process_groups_guarded
 def _execute_campaign(
     config: AdapterConfig,
     project_root: Path,
     afl_fuzz_path: str | Path,
     validation_evidence: dict[str, object],
+    *,
+    _process_registry: ProcessGroupRegistry,
 ) -> CampaignResult:
     """Execute one bounded AFL++ worker and preserve its campaign record."""
+    _require_campaign_storage(config)
     try:
         root = project_root.resolve(strict=True)
         output_parent = config.target.output_parent.resolve(strict=True)
@@ -268,6 +267,8 @@ def _execute_campaign(
     campaign_dir = output_parent / campaign_id
     afl_output_dir = campaign_dir / "afl-output"
 
+    # Recheck immediately before the first write to the campaign filesystem.
+    _require_campaign_storage(config)
     try:
         campaign_dir.mkdir(mode=0o700)
     except OSError as exc:
@@ -341,6 +342,7 @@ def _execute_campaign(
         status = CampaignState.FAILED
         exit_code = None
     else:
+        _process_registry.register(process.pid, process=process)
         metadata["pid"] = process.pid
 
         assert process.stdout is not None
@@ -399,8 +401,10 @@ def _execute_campaign(
                 exit_code = _stop_campaign_group(process)
                 status = CampaignState.FAILED
                 message = f"Error while waiting for AFL++: {exc}"
-        if process.poll() is None:
+        # Also stop descendants when the leader exits normally.
+        if _campaign_group_exists(process.pid):
             _stop_campaign_group(process)
+        _process_registry.unregister(process.pid)
 
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=10)
@@ -419,6 +423,10 @@ def _execute_campaign(
         if log_errors and status == CampaignState.COMPLETED:
             status = CampaignState.FAILED
             message = "AFL++ exited, but campaign log capture failed."
+
+    if _process_registry.interrupted:
+        status = CampaignState.INTERRUPTED
+        message = "Campaign interrupted by SIGTERM; child process groups were stopped."
 
     ended_at = _utc_now()
     metadata.update({
@@ -450,6 +458,8 @@ def run_campaign(
     smoke_timeout_seconds: float = 5.0,
 ) -> CampaignResult:
     """Run all required validation gates before starting one AFL++ worker."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise CampaignError("Refusing to run a fuzzing campaign as root.")
     try:
         root = Path(project_root).expanduser().resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -457,6 +467,9 @@ def run_campaign(
 
     if not root.is_dir():
         raise CampaignError("Project root must be a directory.")
+
+    # Enforce the hard campaign filesystem before a clean build can create files.
+    _require_campaign_storage(config)
 
     clean_build_evidence = None
     existing_build_metadata = None
@@ -572,7 +585,7 @@ def run_campaign(
             + coverage.format()
         )
 
-    fuzzer_path = shutil.which("afl-fuzz")
+    fuzzer_path = shutil.which("afl-fuzz", path=os.defpath)
     if fuzzer_path is None:
         raise CampaignError(
             "Cannot resolve afl-fuzz after validation; campaign was not started."

@@ -1,6 +1,7 @@
 """Tests for the fixed libpng build command planner."""
 
 import hashlib
+import tarfile
 import tempfile
 import unittest
 from dataclasses import replace
@@ -31,6 +32,15 @@ class LibpngBuildPlanTests(unittest.TestCase):
         (self.source / "png.h").write_text(
             '#define PNG_LIBPNG_VER_STRING "1.6.59"\n'
         )
+        self.source_archive = self.base / "downloads" / "libpng-1.6.59.tar.xz"
+        self.source_archive.parent.mkdir(parents=True)
+        with tarfile.open(self.source_archive, mode="w:xz") as archive:
+            archive.add(self.source, arcname="libpng-1.6.59")
+        self.source_archive_patch = patch(
+            "engine.build.source_identity.LIBPNG_SOURCE_ARCHIVE_SHA256",
+            hashlib.sha256(self.source_archive.read_bytes()).hexdigest(),
+        )
+        self.source_archive_patch.start()
 
         self.harness = self.harness_dir / "png_read_harness.c"
         self.harness.write_text("/* test harness */\n")
@@ -67,6 +77,7 @@ class LibpngBuildPlanTests(unittest.TestCase):
                 name="libpng",
                 version="1.6.59",
                 source_dir=self.source,
+                source_archive=self.source_archive,
                 harness_source=self.harness,
                 harness_binary=self.build_dir / "kekkai_png_harness",
                 seed_dir=self.base / "seeds",
@@ -100,6 +111,7 @@ class LibpngBuildPlanTests(unittest.TestCase):
         self.patches.start()
 
     def tearDown(self):
+        self.source_archive_patch.stop()
         self.patches.stop()
         self.temp.cleanup()
 
@@ -150,6 +162,16 @@ class LibpngBuildPlanTests(unittest.TestCase):
             '#define PNG_LIBPNG_VER_STRING "1.6.58"\n'
         )
         with self.assertRaisesRegex(BuildError, "Source version mismatch"):
+            build_command_plan(self.config, self.root)
+
+    def test_rejects_modified_source_with_unchanged_version(self):
+        (self.source / "png.c").write_text("/* changed source */\n")
+        with self.assertRaisesRegex(BuildError, "Source authentication failed"):
+            build_command_plan(self.config, self.root)
+
+    def test_rejects_modified_source_archive(self):
+        self.source_archive.write_bytes(self.source_archive.read_bytes() + b"tamper")
+        with self.assertRaisesRegex(BuildError, "Source authentication failed"):
             build_command_plan(self.config, self.root)
 
     def test_rejects_modified_harness(self):

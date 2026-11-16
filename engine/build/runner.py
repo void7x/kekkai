@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import resource
 import shlex
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -18,7 +21,12 @@ from enum import Enum
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
 from engine.build.libpng import BuildError, build_command_plan
+from engine.processes import (
+    ProcessGroupRegistry, process_group_has_live_members, process_groups_guarded,
+    signal_process_group, stop_process_group,
+)
 
 
 class BuildState(str, Enum):
@@ -94,43 +102,19 @@ def _set_child_limits(memory_mib: int, cpu_seconds: int) -> None:
 
 
 def _group_exists(process_id: int) -> bool:
-    try:
-        os.killpg(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return process_group_has_live_members(process_id)
 
 
 def _signal_group(process, requested_signal: int) -> None:
-    try:
-        os.killpg(process.pid, requested_signal)
-    except ProcessLookupError:
-        pass
-    except OSError:
-        try:
-            process.send_signal(requested_signal)
-        except ProcessLookupError:
-            pass
+    signal_process_group(process.pid, requested_signal)
 
 
 def _stop_group(process) -> int | None:
-    for requested_signal, grace in (
-        (signal.SIGINT, 5),
-        (signal.SIGTERM, 3),
-        (signal.SIGKILL, 2),
-    ):
-        if not _group_exists(process.pid):
-            break
-
-        _signal_group(process, requested_signal)
-        deadline = time.monotonic() + grace
-        while _group_exists(process.pid) and time.monotonic() < deadline:
-            process.poll()
-            time.sleep(0.05)
-
-    return process.poll()
+    return stop_process_group(
+        process.pid,
+        process=process,
+        graces=(5.0, 3.0, 2.0),
+    )
 
 
 def _drain_to_log(
@@ -191,7 +175,7 @@ def verify_build_outputs(build_dir: Path) -> dict[str, str]:
     binary_path = build_dir / "kekkai_png_harness"
 
     for artifact in (cache_path, database_path, header_path, archive_path, binary_path):
-        _regular_artifact(artifact, 64 * 1024 * 1024)
+        _regular_artifact(artifact, MAX_BUILD_ARTIFACT_BYTES)
 
     if not os.access(binary_path, os.X_OK):
         raise BuildError("Built harness is not executable.")
@@ -284,11 +268,198 @@ def verify_build_outputs(build_dir: Path) -> dict[str, str]:
     }
 
 
+def _rename_directory_no_replace(source: Path, destination: Path) -> None:
+    """Atomically move a directory without replacing an existing destination."""
+    if os.name != "posix":
+        raise BuildError("Atomic no-replace directory rename requires POSIX.")
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (AttributeError, OSError) as exc:
+        raise BuildError("renameat2(RENAME_NOREPLACE) is unavailable; recovery refused.") from exc
+
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100, os.fsencode(source), -100, os.fsencode(destination), 1
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def recover_failed_build(
+    config: AdapterConfig,
+    project_root: str | Path,
+) -> Path:
+    """Atomically archive a verified failed/interrupted build without deleting it.
+
+    Only terminal build metadata schema 2 with status ``failed`` or
+    ``interrupted`` is eligible. Completed, running, missing, malformed,
+    mismatched, or symlinked build paths are refused.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise BuildError("Refusing failed-build recovery as root.")
+    if config.build is None:
+        raise BuildError("Adapter has no build configuration.")
+
+    configured = config.build.build_dir
+    if configured.is_symlink():
+        raise BuildError("Configured build directory is a symlink; recovery refused.")
+    try:
+        root = Path(project_root).expanduser().resolve(strict=True)
+        build_dir = configured.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BuildError(f"Cannot resolve failed build directory: {exc}") from exc
+    if not root.is_dir() or not build_dir.is_dir():
+        raise BuildError("Repository or failed build directory is missing.")
+    protected_paths = (
+        ("repository", root),
+        ("target source", config.target.source_dir.resolve(strict=False)),
+        ("campaign output", config.target.output_parent.resolve(strict=False)),
+    )
+    for label, protected in protected_paths:
+        if (
+            build_dir == protected
+            or build_dir in protected.parents
+            or protected in build_dir.parents
+        ):
+            raise BuildError(f"Build directory overlaps the {label}; recovery refused.")
+    if build_dir.is_symlink():
+        raise BuildError("Build directory became a symlink; recovery refused.")
+
+    metadata_path = build_dir / "build.json"
+    try:
+        metadata_info = metadata_path.lstat()
+        if not stat.S_ISREG(metadata_info.st_mode):
+            raise BuildError("Build metadata must be a regular non-symlink file.")
+        if metadata_info.st_size <= 0 or metadata_info.st_size > 1024 * 1024:
+            raise BuildError("Build metadata is missing, empty, or oversized.")
+        raw_metadata = metadata_path.read_bytes()
+        metadata = json.loads(raw_metadata.decode("utf-8"))
+    except BuildError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BuildError(f"Cannot safely read build metadata: {exc}") from exc
+
+    if not isinstance(metadata, dict):
+        raise BuildError("Build metadata must be a JSON object.")
+    if type(metadata.get("schema_version")) is not int or metadata["schema_version"] != 2:
+        raise BuildError("Only build metadata schema 2 can be recovered.")
+    status = metadata.get("status")
+    if type(status) is not str or status not in {
+        BuildState.FAILED.value, BuildState.INTERRUPTED.value
+    }:
+        raise BuildError(
+            "Only terminal failed or interrupted builds can be recovered; "
+            f"observed status {status!r}."
+        )
+    expected_fields = {
+        "target": config.target.name,
+        "target_version": config.target.version,
+        "profile": config.build.profile,
+        "build_dir": str(build_dir),
+    }
+    for key, expected in expected_fields.items():
+        if metadata.get(key) != expected:
+            raise BuildError(f"Build metadata field {key!r} does not match this adapter.")
+    if not isinstance(metadata.get("steps"), list):
+        raise BuildError("Build metadata has no valid steps list.")
+    if not isinstance(metadata.get("artifacts"), dict):
+        raise BuildError("Build metadata has no valid artifacts object.")
+    if not isinstance(metadata.get("started_at"), str) or not metadata.get("started_at"):
+        raise BuildError("Build metadata has no valid start timestamp.")
+    if not isinstance(metadata.get("ended_at"), str) or not metadata.get("ended_at"):
+        raise BuildError("Build metadata is not marked as terminal.")
+
+    existing_manifest = build_dir / "recovery.json"
+    if existing_manifest.exists() or existing_manifest.is_symlink():
+        raise BuildError(
+            "Build already contains recovery.json; recovery refused to overwrite evidence."
+        )
+
+    archive_root = build_dir.parent / "failed-builds"
+    if archive_root.is_symlink():
+        raise BuildError("Failed-build archive directory is a symlink; recovery refused.")
+    try:
+        archive_root.mkdir(mode=0o700, exist_ok=True)
+        archive_info = archive_root.lstat()
+        if not stat.S_ISDIR(archive_info.st_mode):
+            raise BuildError("Failed-build archive path is not a plain directory.")
+        if archive_info.st_mode & 0o077:
+            raise BuildError("Failed-build archive directory must have mode 0700.")
+    except BuildError:
+        raise
+    except OSError as exc:
+        raise BuildError(f"Cannot prepare failed-build archive: {exc}") from exc
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = None
+    metadata_digest = hashlib.sha256(raw_metadata).hexdigest()
+    for _ in range(5):
+        candidate = archive_root / f"{build_dir.name}-{timestamp}-{uuid.uuid4().hex[:12]}"
+        try:
+            _rename_directory_no_replace(build_dir, candidate)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                continue
+            raise BuildError(f"Could not atomically archive failed build: {exc}") from exc
+        destination = candidate
+        break
+    if destination is None:
+        raise BuildError("Could not allocate a unique failed-build archive name.")
+
+    manifest = {
+        "schema_version": 1,
+        "recovered_at": _utc_now(),
+        "original_build_dir": str(build_dir),
+        "archive_dir": str(destination),
+        "original_status": status,
+        "build_started_at": metadata["started_at"],
+        "build_ended_at": metadata["ended_at"],
+        "build_metadata_sha256": metadata_digest,
+        "preservation": "Entire build directory moved atomically; logs and partial outputs retained.",
+    }
+    manifest_path = destination / "recovery.json"
+    temporary_path = destination / f".recovery-{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary_path.open("x", encoding="utf-8") as stream:
+            json.dump(manifest, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary_path, manifest_path, follow_symlinks=False)
+        temporary_path.unlink()
+        directory_fd = os.open(destination, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise BuildError(
+            f"Build was preserved at {destination}, but its recovery manifest could not be completed: {exc}"
+        ) from exc
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    return destination
+
+
+@process_groups_guarded
 def run_libpng_build(
     config: AdapterConfig,
     project_root: str | Path,
+    *,
+    _process_registry: ProcessGroupRegistry,
 ) -> BuildResult:
     """Run the fixed clean build with bounded resources and persistent logs."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise BuildError("Refusing to run the adapter build as root.")
     if config.build is None:
         raise BuildError("Adapter has no build configuration.")
 
@@ -304,13 +475,18 @@ def run_libpng_build(
     started_at = _utc_now()
     metadata_path = build_dir / "build.json"
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": BuildState.RUNNING.value,
         "target": config.target.name,
         "target_version": config.target.version,
         "profile": config.build.profile,
         "build_dir": str(build_dir),
         "adapter_config": str(config.config_path),
+        "source_archive_path": (
+            str(plan.source_archive_path) if plan.source_archive_path else None
+        ),
+        "source_archive_sha256": plan.source_archive_sha256,
+        "source_tree_sha256": plan.source_tree_sha256,
         "jobs": config.build.jobs,
         "timeout_seconds": config.build.timeout_seconds,
         "memory_mib_per_process": config.build.memory_mib,
@@ -388,6 +564,8 @@ def run_libpng_build(
             step_record["ended_at"] = _utc_now()
             break
 
+        _process_registry.register(process.pid, process=process)
+
         stdout_thread = threading.Thread(
             target=_drain_to_log,
             args=(
@@ -433,6 +611,11 @@ def run_libpng_build(
             status = BuildState.FAILED
             message = f"Error waiting for build step {step.name}: {exc}"
 
+        # The build tool may exit while descendants remain in its session.
+        if _group_exists(process.pid):
+            _stop_group(process)
+        _process_registry.unregister(process.pid)
+
         stdout_thread.join(timeout=10)
         stderr_thread.join(timeout=10)
 
@@ -446,6 +629,14 @@ def run_libpng_build(
             process.stdout.close()
         if process.stderr:
             process.stderr.close()
+
+        if _process_registry.interrupted:
+            step_record["status"] = "interrupted"
+            step_record["message"] = (
+                "Build interrupted by SIGTERM; child process groups were stopped."
+            )
+            status = BuildState.INTERRUPTED
+            message = "Build interrupted by SIGTERM; child process groups were stopped."
 
         step_record["exit_code"] = exit_code
         step_record["ended_at"] = _utc_now()
@@ -469,6 +660,10 @@ def run_libpng_build(
         except (BuildError, OSError, UnicodeError, ValueError) as exc:
             status = BuildState.FAILED
             message = f"Build output verification failed: {exc}"
+
+    if _process_registry.interrupted:
+        status = BuildState.INTERRUPTED
+        message = "Build interrupted by SIGTERM; child process groups were stopped."
 
     ended_at = _utc_now()
     metadata.update({

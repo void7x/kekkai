@@ -9,6 +9,8 @@ import re
 import shutil
 import stat
 import subprocess
+
+from engine.processes import run_process_group
 import tempfile
 import time
 from dataclasses import dataclass
@@ -185,7 +187,7 @@ def _run_bounded_process(
         tempfile.TemporaryFile(mode="w+b") as stdout_file,
         tempfile.TemporaryFile(mode="w+b") as stderr_file,
     ):
-        completed = subprocess.run(
+        completed = run_process_group(
             command,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
@@ -375,7 +377,7 @@ def validate_coverage(
             "Coverage maps must remain outside tracked source."
         )
 
-    showmap_path = shutil.which("afl-showmap")
+    showmap_path = shutil.which("afl-showmap", path=os.defpath)
     if showmap_path is None:
         return CoverageReport(
             target_name=config.target.name,
@@ -405,12 +407,13 @@ def validate_coverage(
             repeatability_status="not_run",
         )
 
-    # Remove inherited AFL configuration so an interactive shell or a
-    # previous diagnostic command cannot silently change this validation.
-    child_environment = os.environ.copy()
-    for key in tuple(child_environment):
-        if key.startswith("AFL_") or key.startswith("__AFL_"):
-            child_environment.pop(key, None)
+    # Validation runs with a minimal, documented environment. Do not
+    # inherit loader paths, AFL overrides, or arbitrary shell variables.
+    child_environment = {
+        "PATH": os.defpath,
+        "LC_ALL": "C",
+        "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:symbolize=0",
+    }
 
     try:
         (

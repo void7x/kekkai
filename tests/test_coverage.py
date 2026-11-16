@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -198,7 +199,7 @@ class CoverageTests(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         with patch(
-            "engine.fuzzing.coverage.subprocess.run",
+            "engine.fuzzing.coverage.run_process_group",
             side_effect=fake_subprocess_run,
         ) as process:
             result = _run_bounded_process(
@@ -226,7 +227,8 @@ class CoverageTests(unittest.TestCase):
         self.assertTrue(callable(options["preexec_fn"]))
 
     def test_valid_coverage_and_repeatability(self) -> None:
-        report, mocked_run = self.run_coverage()
+        with patch.dict(os.environ, {"AFL_MAP_SIZE": "1", "LD_PRELOAD": "must-not-leak", "KEKKAI_TEST_SECRET": "must-not-leak"}):
+            report, mocked_run = self.run_coverage()
 
         self.assertTrue(report.passed, report.format())
         self.assertEqual(len(report.cases), 10)
@@ -255,7 +257,14 @@ class CoverageTests(unittest.TestCase):
             self.assertNotIn("@@", argv)
             self.assertEqual(options["cwd"], self.root)
             self.assertIn("timeout", options)
-            self.assertIn("env", options)
+            self.assertEqual(
+                options["env"],
+                {
+                    "PATH": os.defpath,
+                    "LC_ALL": "C",
+                    "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1:symbolize=0",
+                },
+            )
 
     def test_rejects_empty_coverage_map(self) -> None:
         report, _ = self.run_coverage(empty_first_map=True)
@@ -327,7 +336,7 @@ class CoverageTests(unittest.TestCase):
                 "engine.fuzzing.coverage.shutil.which",
                 return_value=None,
             ),
-            patch("engine.fuzzing.coverage.subprocess.run") as process,
+            patch("engine.fuzzing.coverage.run_process_group") as process,
         ):
             report = validate_coverage(self.config, self.root)
 
@@ -365,7 +374,7 @@ class CoverageTests(unittest.TestCase):
                 "engine.fuzzing.coverage.os.geteuid",
                 return_value=0,
             ),
-            patch("engine.fuzzing.coverage.subprocess.run") as process,
+            patch("engine.fuzzing.coverage.run_process_group") as process,
         ):
             with self.assertRaises(CoverageValidationError):
                 validate_coverage(self.config, self.root)

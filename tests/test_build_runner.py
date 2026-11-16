@@ -16,11 +16,13 @@ from engine.adapters.config import (
     ResourceLimits,
     TargetConfig,
 )
-from engine.build.libpng import BuildPlan, BuildStep
+from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
+from engine.build.libpng import BuildError, BuildPlan, BuildStep
 from engine.build.runner import (
     BuildState,
     _drain_to_log,
     run_libpng_build,
+    verify_build_outputs,
 )
 
 
@@ -103,6 +105,26 @@ class BuildRunnerTests(unittest.TestCase):
             )
         return result, verify
 
+    def test_refuses_to_build_as_root_before_planning(self):
+        with (
+            patch("engine.build.runner.os.geteuid", return_value=0),
+            patch("engine.build.runner.build_command_plan") as planner,
+        ):
+            with self.assertRaisesRegex(BuildError, "root"):
+                run_libpng_build(self.config, self.root)
+
+        planner.assert_not_called()
+        self.assertFalse(self.build_dir.exists())
+
+    def test_rejects_artifact_over_shared_size_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            oversized = build_dir / "CMakeCache.txt"
+            with oversized.open("wb") as stream:
+                stream.truncate(MAX_BUILD_ARTIFACT_BYTES + 1)
+            with self.assertRaisesRegex(BuildError, "invalid size"):
+                verify_build_outputs(build_dir)
+
     def test_success_records_each_step_and_artifacts(self):
         result, verify = self.run_plan()
 
@@ -169,6 +191,131 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(metadata["status"], "failed")
         self.assertEqual(metadata["steps"][0]["status"], "failed")
         verify.assert_not_called()
+
+    def test_external_sigterm_stops_build_descendants_and_records_interruption(self):
+        import os
+        import signal
+        import subprocess
+        import time
+
+        pid_file = self.base / "sigterm-process-pids"
+        child_script = self.base / "build_child.py"
+        child_script.write_text(
+            "import os, subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()) + ' ' + str(descendant.pid), encoding='ascii')\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+
+        orchestrator_source = f"""
+import sys
+from unittest.mock import patch
+from engine.adapters.config import AdapterConfig, BuildConfig, FuzzerConfig, ResourceLimits, TargetConfig
+from engine.build.libpng import BuildPlan, BuildStep
+from engine.build.runner import BuildState, run_libpng_build
+
+base = {str(self.base)!r}
+root = {str(self.root)!r}
+build_dir = {str(self.build_dir)!r}
+
+config = AdapterConfig(
+    schema_version=2,
+    target=TargetConfig(
+        name="libpng", version="1.6.59",
+        source_dir=__import__("pathlib").Path(base) / "source",
+        harness_source=__import__("pathlib").Path(root) / "harness.c",
+        harness_binary=__import__("pathlib").Path(build_dir) / "kekkai_png_harness",
+        seed_dir=__import__("pathlib").Path(base) / "seeds",
+        output_parent=__import__("pathlib").Path(base) / "fuzzing",
+    ),
+    fuzzer=FuzzerConfig("afl-fuzz", "4.33c"),
+    limits=ResourceLimits(300, 512, 1000, 8388608),
+    config_path=__import__("pathlib").Path(root) / "adapter.toml",
+    build=BuildConfig(
+        profile="libpng-afl-ubsan",
+        build_dir=__import__("pathlib").Path(build_dir),
+        jobs=2, timeout_seconds=20, memory_mib=4096,
+        log_limit_bytes=1048576,
+    ),
+)
+plan = BuildPlan(
+    build_dir=__import__("pathlib").Path(build_dir),
+    steps=(BuildStep("configure", (sys.executable, {str(child_script)!r})),),
+    environment=(("PATH", "/bin:/usr/bin"), ("LC_ALL", "C")),
+)
+with patch("engine.build.runner.build_command_plan", return_value=plan), patch(
+    "engine.build.runner.verify_build_outputs", return_value=dict()
+):
+    result = run_libpng_build(config, root)
+
+if result.status != BuildState.INTERRUPTED:
+    raise SystemExit(42)
+"""
+
+        orchestrator = subprocess.Popen(
+            [sys.executable, "-c", orchestrator_source],
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+        try:
+            deadline = time.monotonic() + 8
+            while (
+                not pid_file.exists()
+                and orchestrator.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+
+            if not pid_file.exists():
+                _, diagnostic = orchestrator.communicate(timeout=2)
+                self.fail(
+                    f"Build subprocess did not create PID evidence. "
+                    f"Exit={orchestrator.returncode}; stderr={diagnostic.decode(errors='replace')}"
+                )
+
+            build_child_pid, descendant_pid = map(
+                int, pid_file.read_text(encoding="ascii").split()
+            )
+
+            os.kill(orchestrator.pid, signal.SIGTERM)
+            _, diagnostic = orchestrator.communicate(timeout=10)
+            self.assertEqual(
+                orchestrator.returncode, 0,
+                diagnostic.decode(errors="replace"),
+            )
+
+            metadata = json.loads((self.build_dir / "build.json").read_text())
+            self.assertEqual(metadata["status"], "interrupted")
+            self.assertTrue(metadata["ended_at"])
+            self.assertEqual(metadata["steps"][0]["status"], "interrupted")
+
+            def is_live(pid):
+                try:
+                    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+                except FileNotFoundError:
+                    return False
+                fields = raw[raw.rfind(")") + 2:].split()
+                return bool(fields) and fields[0] not in {"Z", "X"}
+
+            deadline = time.monotonic() + 3
+            while (
+                (is_live(build_child_pid) or is_live(descendant_pid))
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+
+            self.assertFalse(is_live(build_child_pid), "Build child survived SIGTERM.")
+            self.assertFalse(is_live(descendant_pid), "Build descendant survived SIGTERM.")
+        finally:
+            if orchestrator.poll() is None:
+                orchestrator.kill()
+                orchestrator.wait(timeout=3)
 
     def test_keyboard_interrupt_records_interrupted_state(self):
         fake_process = Mock()

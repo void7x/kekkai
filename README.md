@@ -6,7 +6,7 @@ KEKKAI is a local-first research platform for discovering, reproducing and inves
 
 Its defining capability is **evidence-driven, version-aware investigation**: a crash is preserved with the exact experiment that produced it, replayed for confirmation, and checked against other recorded software versions. KEKKAI reports what the evidence supports; it does not turn every crash into a claimed vulnerability.
 
-> **Current status:** Phase 0 is complete, and the Phase 1 libpng 1.6.59 pilot has completed its manual target-integration work. A target-specific C harness, baseline build, AFL++ instrumentation and coverage checks are verified. One five-minute smoke campaign completed 280,452 executions, and all 262 retained corpus entries passed separate ASan+UBSan replay. Important limitation: AFL++ selected a 5 ms effective timeout despite the requested `-t 1000+`; this is a bounded pilot result, not evidence of vulnerability absence. The reusable target-adapter configuration, automated harness validation, campaign manager, crash-evidence database, dashboard and AI integration are not yet implemented as KEKKAI components.
+> **Current status:** Phase 0 and Phase 1 are complete. The libpng 1.6.59 Phase 2 adapter, build provenance, preflight, harness smoke validation, coverage validation and bounded AFL++ campaign orchestration are implemented. The security-remediation work is documented in [Phase 2 Security Remediation Verification](docs/tasks/PHASE2_SECURITY_REMEDIATION.md). Phase 2 is functionally complete for the initial libpng 1.6.59 pilot, subject to final local closeout. The latest recorded full test run passed 143 tests with 0 failures and 0 errors. Authenticated build provenance, preflight, smoke and coverage checks also passed. No new live AFL++ campaign was launched during remediation. Remaining limitations are explicitly recorded in that report.
 
 ## Locked project direction
 
@@ -16,7 +16,7 @@ The engineering workflow is recorded in [Workflow and Technology Decisions](docs
 
 The first proof-of-work target, **libpng 1.6.59**, has completed its manual integration pilot. The pinned source, target-specific C harness, baseline and instrumented builds, coverage checks, bounded smoke campaign and retained-corpus sanitizer replay are documented under `docs/tasks/`.
 
-This pilot is not yet a reusable KEKKAI target adapter or automated campaign runner. Those are Phase 2 work. The previous smoke campaign's effective timeout was 5 ms, so a future campaign that requires a one-second fixed timeout must use and verify the fixed-timeout configuration rather than assuming `-t 1000+` means 1,000 ms.
+The manual libpng pilot has since been extended into a reusable target adapter and bounded campaign orchestrator. The implementation and its historical live-campaign evidence are recorded in the Phase 2 verification report. The security-remediation review and its remaining limitations are recorded in the [security remediation report](docs/tasks/PHASE2_SECURITY_REMEDIATION.md).
 
 ### Core workflow
 

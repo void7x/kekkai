@@ -19,6 +19,7 @@ from engine.adapters.config import (
     TargetConfig,
 )
 from engine.build.runner import BuildState
+from engine.storage import StorageError
 from engine.fuzzing.campaign import (
     CampaignError,
     CampaignState,
@@ -67,6 +68,85 @@ class CampaignCommandTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_refuses_to_start_as_root_before_build_or_validation(self):
+        repository = self.base / "repository-root-check"
+        repository.mkdir()
+        with (
+            patch("engine.fuzzing.campaign.os.geteuid", return_value=0),
+            patch("engine.fuzzing.campaign.run_libpng_build") as build,
+            patch("engine.fuzzing.campaign.validate_adapter") as preflight,
+        ):
+            with self.assertRaisesRegex(CampaignError, "root"):
+                run_campaign(self.config, repository)
+
+        build.assert_not_called()
+        preflight.assert_not_called()
+
+    def _schema4_storage_config(self):
+        build_dir = self.base / "work" / "builds" / "clean"
+        return replace(
+            self.config,
+            schema_version=4,
+            target=replace(
+                self.config.target,
+                harness_binary=build_dir / "kekkai_png_harness",
+                campaign_storage_image=self.base / "campaign-quota.ext4",
+                campaign_storage_uuid="e8657221-eb6f-41ca-b087-76912b527e4b",
+            ),
+            build=BuildConfig(
+                profile="libpng-afl-ubsan",
+                build_dir=build_dir,
+                jobs=2,
+                timeout_seconds=900,
+                memory_mib=4096,
+                log_limit_bytes=16 * 1024 * 1024,
+            ),
+        )
+
+    def test_unmounted_storage_blocks_before_build_or_preflight(self):
+        repository = self.base / "repository-storage-guard"
+        repository.mkdir()
+        config = self._schema4_storage_config()
+        with (
+            patch(
+                "engine.fuzzing.campaign.verify_campaign_storage",
+                side_effect=StorageError("dedicated volume is not mounted"),
+            ) as verify_storage,
+            patch("engine.fuzzing.campaign.run_libpng_build") as build,
+            patch("engine.fuzzing.campaign.validate_adapter") as preflight,
+        ):
+            with self.assertRaisesRegex(CampaignError, "storage verification failed"):
+                run_campaign(config, repository)
+
+        verify_storage.assert_called_once_with(
+            config.target.campaign_storage_image,
+            config.target.campaign_storage_uuid,
+            config.target.output_parent,
+        )
+        build.assert_not_called()
+        preflight.assert_not_called()
+        self.assertFalse(config.build.build_dir.exists())
+        self.assertEqual(list(self.output_parent.iterdir()), [])
+
+    def test_direct_campaign_execution_refuses_unmounted_storage_before_writes(self):
+        repository = self.base / "repository-direct-storage-guard"
+        repository.mkdir()
+        config = self._schema4_storage_config()
+        with patch(
+            "engine.fuzzing.campaign.verify_campaign_storage",
+            side_effect=StorageError("dedicated volume is not mounted"),
+        ) as verify_storage:
+            with self.assertRaisesRegex(CampaignError, "storage verification failed"):
+                _execute_campaign(
+                    config,
+                    repository,
+                    self.fuzzer,
+                    {"preflight": "passed"},
+                )
+
+        verify_storage.assert_called_once()
+        self.assertEqual(list(self.output_parent.iterdir()), [])
 
     def run_fake_campaign(self, script_body):
         self.fuzzer.write_text(
@@ -584,6 +664,143 @@ class CampaignCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertFalse(_campaign_group_exists(process.pid))
+
+    def test_external_sigterm_stops_campaign_descendants_and_records_interruption(self):
+        import signal
+        import sys
+        import time
+
+        pid_file = self.base / "campaign-sigterm-pids"
+        fuzzer_script = self.base / "fake_afl_sigterm.py"
+        repository = self.base / "repository-campaign-sigterm"
+        source_dir = self.base / "source-campaign-sigterm"
+        seed_dir = self.base / "seeds-campaign-sigterm"
+        output_parent = self.base / "output-campaign-sigterm"
+
+        for directory in (repository, source_dir, seed_dir, output_parent):
+            directory.mkdir()
+
+        fuzzer_source = (
+            f"#!{sys.executable}\n"
+            "import os, subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()) + ' ' + str(descendant.pid), encoding='ascii')\n"
+            "time.sleep(60)\n"
+        )
+        fuzzer_script.write_text(fuzzer_source, encoding="utf-8")
+        fuzzer_script.chmod(0o755)
+
+        orchestrator_source = f"""
+import sys
+from pathlib import Path
+from engine.adapters.config import AdapterConfig, FuzzerConfig, ResourceLimits, TargetConfig
+from engine.fuzzing.campaign import CampaignState, _execute_campaign
+
+base = Path({str(self.base)!r})
+config = AdapterConfig(
+    schema_version=1,
+    target=TargetConfig(
+        name="libpng",
+        version="1.6.59",
+        source_dir=Path({str(source_dir)!r}),
+        harness_source=base / "harness.c",
+        harness_binary=Path({str(self.binary)!r}),
+        seed_dir=Path({str(seed_dir)!r}),
+        output_parent=Path({str(output_parent)!r}),
+    ),
+    fuzzer=FuzzerConfig("afl-fuzz", "4.33c"),
+    limits=ResourceLimits(300, 512, 1000, 8388608),
+    config_path=base / "adapter.toml",
+)
+
+result = _execute_campaign(
+    config,
+    Path({str(repository)!r}),
+    Path({str(fuzzer_script)!r}),
+    {{"preflight": "passed"}},
+)
+if result.status != CampaignState.INTERRUPTED:
+    raise SystemExit(42)
+"""
+
+        orchestrator = subprocess.Popen(
+            [sys.executable, "-c", orchestrator_source],
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+
+        try:
+            deadline = time.monotonic() + 8
+            while (
+                not pid_file.exists()
+                and orchestrator.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+
+            if not pid_file.exists():
+                _, diagnostic = orchestrator.communicate(timeout=2)
+                self.fail(
+                    f"Campaign subprocess did not create PID evidence. "
+                    f"Exit={orchestrator.returncode}; "
+                    f"stderr={diagnostic.decode(errors='replace')}"
+                )
+
+            fuzzer_pid, descendant_pid = map(
+                int, pid_file.read_text(encoding="ascii").split()
+            )
+
+            os.kill(orchestrator.pid, signal.SIGTERM)
+            _, diagnostic = orchestrator.communicate(timeout=10)
+            self.assertEqual(
+                orchestrator.returncode,
+                0,
+                diagnostic.decode(errors="replace"),
+            )
+
+            campaign_dirs = list(output_parent.glob("campaign-*"))
+            self.assertEqual(len(campaign_dirs), 1)
+
+            metadata = json.loads(
+                (campaign_dirs[0] / "campaign.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["status"], "interrupted")
+            self.assertTrue(metadata["ended_at"])
+            self.assertIn("SIGTERM", metadata["message"])
+
+            def is_live(pid):
+                try:
+                    raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+                except FileNotFoundError:
+                    return False
+                fields = raw[raw.rfind(")") + 2:].split()
+                return bool(fields) and fields[0] not in {"Z", "X"}
+
+            deadline = time.monotonic() + 3
+            while (
+                (is_live(fuzzer_pid) or is_live(descendant_pid))
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+
+            self.assertFalse(is_live(fuzzer_pid), "AFL++ process survived SIGTERM.")
+            self.assertFalse(is_live(descendant_pid), "AFL++ descendant survived SIGTERM.")
+
+        finally:
+            if orchestrator.poll() is None:
+                orchestrator.kill()
+                orchestrator.communicate(timeout=5)
+
+            if pid_file.exists():
+                try:
+                    fuzzer_pid = int(pid_file.read_text(encoding="ascii").split()[0])
+                    os.killpg(fuzzer_pid, signal.SIGKILL)
+                except (ProcessLookupError, ValueError, OSError):
+                    pass
 
     def test_campaign_watchdog_stops_overlong_process(self):
         self.config = replace(
