@@ -532,7 +532,9 @@ def run_campaign(
         else:
             try:
                 build_result = run_libpng_build(config, root)
-            except (BuildError, OSError, RuntimeError, ValueError) as exc:
+            except (
+                BuildError, ProcessInterruptedError, OSError, RuntimeError, ValueError
+            ) as exc:
                 raise CampaignError(
                     "Adapter-driven clean build failed; campaign was not started.\\n"
                     + str(exc)
