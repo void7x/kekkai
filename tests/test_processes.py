@@ -7,11 +7,16 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 
-from engine.processes import ProcessGroupRegistry, run_process_group
+from engine.processes import (
+    ProcessGroupRegistry,
+    ProcessInterruptedError,
+    run_process_group,
+)
 
 
 class ProcessGroupTests(unittest.TestCase):
@@ -87,6 +92,37 @@ class ProcessGroupTests(unittest.TestCase):
 
                 self.assertEqual(process.returncode, -signal.SIGKILL)
                 self.assertFalse(_pid_is_live(process.pid))
+
+    def test_run_process_group_raises_when_sigterm_interrupts_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ready_file = Path(temporary) / "ready"
+            child_code = (
+                "import time\n"
+                "from pathlib import Path\n"
+                f"Path({str(ready_file)!r}).write_text('ready')\n"
+                "time.sleep(30)\n"
+            )
+
+            def send_sigterm():
+                deadline = time.monotonic() + 5.0
+                while not ready_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if ready_file.exists():
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+            sender = threading.Thread(target=send_sigterm, daemon=True)
+            sender.start()
+            with self.assertRaises(ProcessInterruptedError):
+                run_process_group(
+                    [sys.executable, "-c", child_code],
+                    timeout=8,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                )
+            sender.join(timeout=2.0)
+            self.assertFalse(sender.is_alive())
 
     def test_check_flag_matches_subprocess_run_semantics(self):
         success = run_process_group(
