@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import uuid
 import unittest
@@ -13,6 +14,7 @@ from engine.storage import (
     _decode_mount_field,
     _parse_mountinfo_text,
     _read_ext4_uuid,
+    _verify_mountpoint_permissions,
     verify_campaign_storage,
 )
 
@@ -33,6 +35,35 @@ class CampaignStorageTests(unittest.TestCase):
             os.close(descriptor)
         image.chmod(0o600)
         return image
+
+    def test_accepts_private_user_owned_mountpoint(self):
+        from types import SimpleNamespace
+
+        info = SimpleNamespace(
+            st_uid=os.getuid(),
+            st_mode=stat.S_IFDIR | 0o700,
+        )
+        _verify_mountpoint_permissions(info)
+
+    def test_rejects_mountpoint_owned_by_another_user(self):
+        from types import SimpleNamespace
+
+        info = SimpleNamespace(
+            st_uid=os.getuid() + 1,
+            st_mode=stat.S_IFDIR | 0o700,
+        )
+        with self.assertRaisesRegex(StorageError, "owned by the current user"):
+            _verify_mountpoint_permissions(info)
+
+    def test_rejects_mountpoint_with_group_or_world_permissions(self):
+        from types import SimpleNamespace
+
+        info = SimpleNamespace(
+            st_uid=os.getuid(),
+            st_mode=stat.S_IFDIR | 0o755,
+        )
+        with self.assertRaisesRegex(StorageError, "mode 0700"):
+            _verify_mountpoint_permissions(info)
 
     def test_reads_uuid_from_ext4_superblock(self):
         with tempfile.TemporaryDirectory() as temporary:
