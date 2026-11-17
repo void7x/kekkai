@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
-from engine.processes import run_process_group
+from engine.processes import ProcessInterruptedError, run_process_group
 from engine.storage import StorageError, verify_campaign_storage
 
 
@@ -586,6 +586,8 @@ def validate_adapter(
                     "failed",
                     "AFL++ --version did not finish within five seconds.",
                 )
+            except ProcessInterruptedError:
+                raise
             except (OSError, subprocess.SubprocessError) as exc:
                 add(
                     "fuzzer_version",
