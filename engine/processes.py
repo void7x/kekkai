@@ -74,18 +74,31 @@ def stop_process_group(
     return None
 
 
+class ProcessInterruptedError(subprocess.SubprocessError):
+    """Raised when SIGTERM interrupts a managed KEKKAI subprocess."""
+
+
 class ProcessGroupRegistry:
-    """Temporarily translate SIGTERM into cleanup of registered child groups."""
+    """Temporarily translate SIGTERM into bounded cleanup of child groups."""
 
     def __init__(self) -> None:
-        self._groups: set[int] = set()
+        self._groups: dict[
+            int,
+            tuple[
+                subprocess.Popen | None,
+                tuple[float, float, float],
+            ],
+        ] = {}
         self._previous_handler: Any = None
         self._installed = False
+        self._in_handler = False
         self.interrupted = False
 
     def __enter__(self) -> "ProcessGroupRegistry":
         if threading.current_thread() is not threading.main_thread():
-            raise RuntimeError("KEKKAI process-group execution must run on the main thread for SIGTERM cleanup.")
+            raise RuntimeError(
+                "KEKKAI process-group execution must run on the main thread for SIGTERM cleanup."
+            )
         self._previous_handler = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         self._installed = True
@@ -93,26 +106,52 @@ class ProcessGroupRegistry:
 
     def _handle_sigterm(self, signum: int, frame: object) -> None:
         self.interrupted = True
-        for process_group_id in tuple(self._groups):
-            stop_process_group(process_group_id)
+        if self._in_handler:
+            return
+        self._in_handler = True
+        try:
+            for process_group_id, (process, graces) in tuple(self._groups.items()):
+                stop_process_group(
+                    process_group_id,
+                    process=process,
+                    graces=graces,
+                )
+        finally:
+            self._in_handler = False
+
+    def raise_if_interrupted(self) -> None:
+        if self.interrupted:
+            raise ProcessInterruptedError(
+                "Process operation interrupted by SIGTERM."
+            )
 
     def register(
         self,
         process_group_id: int,
         process: subprocess.Popen | None = None,
+        *,
+        graces: tuple[float, float, float] = (0.5, 0.5, 1.0),
     ) -> None:
-        self._groups.add(process_group_id)
-        # SIGTERM may have arrived after Popen created the child but before
-        # registration. Complete the same bounded INT/TERM/KILL cleanup.
+        self._groups[process_group_id] = (process, graces)
+        # SIGTERM may arrive between Popen and registration. Registration
+        # observes the flag and immediately applies this process's policy.
         if self.interrupted:
-            stop_process_group(process_group_id, process=process)
+            stop_process_group(
+                process_group_id,
+                process=process,
+                graces=graces,
+            )
 
     def unregister(self, process_group_id: int) -> None:
-        self._groups.discard(process_group_id)
+        self._groups.pop(process_group_id, None)
 
     def stop_all(self) -> None:
-        for process_group_id in tuple(self._groups):
-            stop_process_group(process_group_id)
+        for process_group_id, (process, graces) in tuple(self._groups.items()):
+            stop_process_group(
+                process_group_id,
+                process=process,
+                graces=graces,
+            )
             self.unregister(process_group_id)
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
@@ -143,6 +182,7 @@ def run_process_group(
 ) -> subprocess.CompletedProcess:
     """Run one validator in its own session and always clean surviving children."""
     with ProcessGroupRegistry() as registry:
+        registry.raise_if_interrupted()
         process = subprocess.Popen(
             command,
             start_new_session=True,
@@ -166,6 +206,11 @@ def run_process_group(
             except subprocess.TimeoutExpired:
                 stop_process_group(process.pid, process=process)
             registry.unregister(process.pid)
+
+    if registry.interrupted:
+        raise ProcessInterruptedError(
+            "Managed subprocess was interrupted by SIGTERM."
+        )
 
     completed = subprocess.CompletedProcess(command, return_code)
     if check and return_code != 0:
