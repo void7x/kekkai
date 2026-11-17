@@ -17,7 +17,7 @@ from pathlib import Path
 
 from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
 from engine.build.source_identity import verify_libpng_source_identity
-from engine.processes import run_process_group
+from engine.processes import ProcessInterruptedError, run_process_group
 
 
 _PINNED_COMPILER = Path("/usr/bin/afl-clang-fast")
@@ -497,6 +497,8 @@ def _verify_adapter_build_provenance(
             f"Observed {zlib_match.group(1) if zlib_match else 'unknown'}.",
         )
 
+    except ProcessInterruptedError:
+        raise
     except (
         OSError, UnicodeError, ValueError, KeyError, TypeError,
         subprocess.SubprocessError, json.JSONDecodeError,
@@ -739,6 +741,8 @@ def verify_build_provenance(
             "from the binary.",
         )
 
+    except ProcessInterruptedError:
+        raise
     except (
         OSError, UnicodeError, ValueError, KeyError, TypeError,
         tomllib.TOMLDecodeError, subprocess.SubprocessError,
