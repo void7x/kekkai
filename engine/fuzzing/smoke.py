@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
-from engine.processes import run_process_group
+from engine.processes import ProcessInterruptedError, run_process_group
 
 
 class HarnessSmokeError(RuntimeError):
@@ -645,6 +645,8 @@ def run_harness_smoke(
                         shell=False,
                     )
                     actual_exit_code = completed.returncode
+                except ProcessInterruptedError:
+                    raise
                 except subprocess.TimeoutExpired:
                     failure_message = (
                         f"Exceeded the {timeout_seconds:.2f}s timeout; "
