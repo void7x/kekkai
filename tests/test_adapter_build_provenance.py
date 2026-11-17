@@ -66,6 +66,12 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
         self.binary.write_bytes(b"fake executable")
         self.binary.chmod(0o755)
 
+        compiler_dir = self.base / "tools"
+        compiler_dir.mkdir()
+        self.compiler = compiler_dir / "afl-clang-fast"
+        self.compiler.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+        self.compiler.chmod(0o755)
+
         self.archive = self.build_dir / "libpng16.a"
         self.archive.write_bytes(b"fake archive")
 
