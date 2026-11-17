@@ -119,6 +119,14 @@ def _read_ext4_uuid(image: Path) -> str:
         os.close(descriptor)
 
 
+def _verify_mountpoint_permissions(info: os.stat_result) -> None:
+    """Require the mounted filesystem root to be private to the current user."""
+    if info.st_uid != os.getuid():
+        raise StorageError("Campaign mountpoint must be owned by the current user.")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        raise StorageError("Campaign mountpoint must have mode 0700.")
+
+
 def verify_campaign_storage(
     image_path: str | Path,
     expected_uuid: str,
@@ -192,6 +200,7 @@ def verify_campaign_storage(
         raise StorageError(f"Cannot inspect campaign mountpoint: {exc}") from exc
     if not stat.S_ISDIR(mount_info.st_mode):
         raise StorageError("Campaign mountpoint is not a plain directory.")
+    _verify_mountpoint_permissions(mount_info)
     observed_device = f"{os.major(mount_info.st_dev)}:{os.minor(mount_info.st_dev)}"
     if observed_device != record.major_minor:
         raise StorageError("Campaign mountpoint device does not match mountinfo.")
