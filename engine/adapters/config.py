@@ -132,7 +132,14 @@ def _reject_symlink_components(path: Path, field: str) -> None:
     for part in path.parts[1:]:
         candidate = current / part
 
-        if part not in ("", ".", "..") and candidate.is_symlink():
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+
+        candidate = current / part
+        if candidate.is_symlink():
             raise AdapterConfigError(
                 f"Path for '{field}' contains a symlink: {candidate}"
             )
@@ -146,9 +153,7 @@ def _resolve_path(value: str, project_root: Path, field: str) -> Path:
         if not path.is_absolute():
             path = project_root / path
 
-        if field in ("target.source_dir", "target.source_archive", "target.campaign_storage_image", "target.output_parent"):
-            _reject_symlink_components(path, field)
-
+        _reject_symlink_components(path, field)
         return path.resolve(strict=False)
     except (OSError, RuntimeError, ValueError) as exc:
         raise AdapterConfigError(
