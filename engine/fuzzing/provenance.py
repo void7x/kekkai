@@ -17,6 +17,14 @@ from pathlib import Path
 
 from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
 from engine.build.source_identity import verify_libpng_source_identity
+from engine.processes import run_process_group
+
+
+_PINNED_COMPILER = Path("/usr/bin/afl-clang-fast")
+_PINNED_CMAKE = Path("/usr/bin/cmake")
+_PINNED_NINJA = Path("/usr/bin/ninja")
+_PINNED_AWK = Path("/usr/bin/gawk")
+_PINNED_ZLIB_LIBRARY = Path("/usr/lib/x86_64-linux-gnu/libz.so")
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,62 @@ def _run_bounded_version(command: list[str]) -> tuple[int, str]:
 
 
 
+def _expected_adapter_build_commands(
+    config,
+    build_dir: Path,
+    *,
+    compiler: Path | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """Reconstruct the only approved Phase 2 build command sequence."""
+    source = config.target.source_dir.resolve(strict=True)
+    compiler_path = compiler or _PINNED_COMPILER
+    cmake_command = [
+        str(_PINNED_CMAKE),
+        "-S", str(source),
+        "-B", str(build_dir),
+        "-G", "Ninja",
+        "-DCMAKE_MAKE_PROGRAM=" + str(_PINNED_NINJA),
+        "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        "-DCMAKE_C_COMPILER=" + str(compiler_path),
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        "-DAWK=" + str(_PINNED_AWK),
+        "-DPNG_BUILD_ZLIB=OFF",
+        "-DPNG_EXECUTABLES=ON",
+        "-DPNG_FRAMEWORK=OFF",
+        "-DPNG_HARDWARE_OPTIMIZATIONS=ON",
+        "-DPNG_INTEL_SSE=on",
+        "-DPNG_SHARED=OFF",
+        "-DPNG_STATIC=ON",
+        "-DPNG_TESTS=OFF",
+        "-DPNG_TOOLS=OFF",
+        "-DZLIB_INCLUDE_DIR=/usr/include",
+        "-DZLIB_LIBRARY_RELEASE=" + str(_PINNED_ZLIB_LIBRARY),
+    ]
+    ninja_command = [
+        str(_PINNED_NINJA),
+        "-C", str(build_dir),
+        "-j", str(config.build.jobs),
+        "-v",
+        "png_static",
+    ]
+    harness_command = [
+        str(compiler_path),
+        "-O2",
+        "-g",
+        "-DNDEBUG",
+        "-fPIC",
+        "-I", str(source),
+        "-I", str(build_dir),
+        str(config.target.harness_source),
+        str(build_dir / "libpng16.a"),
+        str(_PINNED_ZLIB_LIBRARY),
+        "-lm",
+        "-o", str(build_dir / "kekkai_png_harness"),
+    ]
+    return cmake_command, ninja_command, harness_command
+
+
 def _verify_adapter_build_provenance(
     config,
     project_root: str | Path,
@@ -161,15 +225,21 @@ def _verify_adapter_build_provenance(
         if not isinstance(metadata, dict):
             raise ValueError("Build metadata must be a JSON object.")
 
+        metadata_build_dir = metadata.get("build_dir")
+        metadata_adapter_config = metadata.get("adapter_config")
         identity_valid = (
             metadata.get("schema_version") == 2
             and metadata.get("status") == "completed"
             and metadata.get("target") == "libpng"
             and metadata.get("target_version") == config.target.version
             and metadata.get("profile") == config.build.profile
-            and Path(metadata.get("build_dir", "")).resolve() == build_dir
-            and Path(metadata.get("adapter_config", "")).resolve()
-            == config.config_path.resolve()
+            and isinstance(metadata_build_dir, str)
+            and bool(metadata_build_dir.strip())
+            and Path(metadata_build_dir).resolve(strict=True) == build_dir
+            and isinstance(metadata_adapter_config, str)
+            and bool(metadata_adapter_config.strip())
+            and Path(metadata_adapter_config).resolve(strict=True)
+            == config.config_path.resolve(strict=True)
         )
         add(
             "adapter_build_identity",
@@ -207,6 +277,9 @@ def _verify_adapter_build_provenance(
 
         steps = metadata.get("steps")
         expected_steps = ("configure", "library", "harness")
+        expected_commands = _expected_adapter_build_commands(
+            config, build_dir, compiler=_PINNED_COMPILER
+        )
         steps_valid = (
             isinstance(steps, list)
             and tuple(step.get("name") for step in steps if isinstance(step, dict))
@@ -218,6 +291,8 @@ def _verify_adapter_build_provenance(
                 and step.get("exit_code") == 0
                 for step in steps
             )
+            and tuple(step.get("command") for step in steps if isinstance(step, dict))
+            == expected_commands
         )
         add(
             "build_steps",
@@ -257,8 +332,10 @@ def _verify_adapter_build_provenance(
 
         for key, artifact_path in expected_artifacts.items():
             expected_hash = artifact_hashes.get(key)
-            _read_bounded_file(artifact_path, _MAX_BUILD_FILE_BYTES)
-            actual_hash = _sha256(artifact_path)
+            artifact_bytes = _read_bounded_file(
+                artifact_path, _MAX_BUILD_FILE_BYTES
+            )
+            actual_hash = hashlib.sha256(artifact_bytes).hexdigest()
             valid = (
                 isinstance(expected_hash, str)
                 and re.fullmatch(r"[0-9a-f]{64}", expected_hash) is not None
@@ -277,7 +354,7 @@ def _verify_adapter_build_provenance(
         ).decode("utf-8")
         expected_cache = {
             "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-            "CMAKE_C_COMPILER": "/usr/bin/afl-clang-fast",
+            "CMAKE_C_COMPILER": str(_PINNED_COMPILER),
             "CMAKE_GENERATOR": "Ninja",
             "CMAKE_MAKE_PROGRAM": "/usr/bin/ninja",
             "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -334,7 +411,7 @@ def _verify_adapter_build_provenance(
             )
         )
         database_valid = isinstance(database, list) and len(database) == 17
-        compiler = Path("/usr/bin/afl-clang-fast").resolve(strict=True)
+        compiler = _PINNED_COMPILER.resolve(strict=True)
         compiler_matches = database_valid
 
         if database_valid:
@@ -400,8 +477,8 @@ def _verify_adapter_build_provenance(
         afl_version = afl_match.group(1) if afl_match else None
         add(
             "aflpp_version",
-            afl_rc == 0 and afl_version == "4.33c",
-            f"Observed AFL++ version {afl_version!r}.",
+            afl_rc == 0 and afl_version == config.fuzzer.expected_version,
+            f"Expected AFL++ {config.fuzzer.expected_version}; observed {afl_version!r}.",
         )
 
         zlib_header = Path("/usr/include/zlib.h")
@@ -485,7 +562,8 @@ def verify_build_provenance(
             ("harness_source", source_path, manifest["harness_source_sha256"]),
             ("harness_binary", binary_path, manifest["harness_binary_sha256"]),
         ):
-            actual = _sha256(path)
+            content = _read_bounded_file(path, _MAX_BUILD_FILE_BYTES)
+            actual = hashlib.sha256(content).hexdigest()
             add(
                 label,
                 actual == expected,
