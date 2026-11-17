@@ -24,7 +24,8 @@ from engine.adapters.config import AdapterConfig
 from engine.build.artifact_limits import MAX_BUILD_ARTIFACT_BYTES
 from engine.build.libpng import BuildError, build_command_plan
 from engine.processes import (
-    ProcessGroupRegistry, process_group_has_live_members, process_groups_guarded,
+    ProcessGroupRegistry, ProcessInterruptedError,
+    process_group_has_live_members, process_groups_guarded,
     signal_process_group, stop_process_group,
 )
 
@@ -471,11 +472,13 @@ def run_libpng_build(
     """Run the fixed clean build with bounded resources and persistent logs."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         raise BuildError("Refusing to run the adapter build as root.")
+    _process_registry.raise_if_interrupted()
     if config.build is None:
         raise BuildError("Adapter has no build configuration.")
 
     plan = build_command_plan(config, project_root)
     build_dir = plan.build_dir
+    _process_registry.raise_if_interrupted()
     build_dir.mkdir(mode=0o700)
 
     stdout_path = build_dir / "stdout.log"
@@ -551,6 +554,7 @@ def run_libpng_build(
             break
 
         try:
+            _process_registry.raise_if_interrupted()
             process = subprocess.Popen(
                 step.command,
                 cwd=root,
@@ -567,6 +571,13 @@ def run_libpng_build(
                     config.build.timeout_seconds,
                 ),
             )
+        except ProcessInterruptedError:
+            status = BuildState.INTERRUPTED
+            message = "Build interrupted by SIGTERM before the next process started."
+            step_record["status"] = "interrupted"
+            step_record["message"] = message
+            step_record["ended_at"] = _utc_now()
+            break
         except OSError as exc:
             status = BuildState.FAILED
             message = f"Could not start build step {step.name}: {exc}"
@@ -575,7 +586,11 @@ def run_libpng_build(
             step_record["ended_at"] = _utc_now()
             break
 
-        _process_registry.register(process.pid, process=process)
+        _process_registry.register(
+            process.pid,
+            process=process,
+            graces=(5.0, 3.0, 2.0),
+        )
 
         stdout_thread = threading.Thread(
             target=_drain_to_log,
