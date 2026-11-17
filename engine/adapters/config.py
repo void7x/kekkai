@@ -130,8 +130,6 @@ def _reject_symlink_components(path: Path, field: str) -> None:
     current = Path(path.anchor)
 
     for part in path.parts[1:]:
-        candidate = current / part
-
         if part in ("", "."):
             continue
         if part == "..":
