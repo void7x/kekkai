@@ -124,6 +124,40 @@ class ProcessGroupTests(unittest.TestCase):
             sender.join(timeout=2.0)
             self.assertFalse(sender.is_alive())
 
+    def test_interrupted_registry_refuses_to_start_child(self):
+        enter = ProcessGroupRegistry.__enter__
+
+        def enter_interrupted(registry):
+            enter(registry)
+            registry.interrupted = True
+            return registry
+
+        with (
+            patch.object(ProcessGroupRegistry, "__enter__", enter_interrupted),
+            patch("engine.processes.subprocess.Popen") as popen,
+            self.assertRaises(ProcessInterruptedError),
+        ):
+            run_process_group(
+                [sys.executable, "-c", "pass"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        popen.assert_not_called()
+
+    def test_sigterm_uses_registered_grace_periods(self):
+        with ProcessGroupRegistry() as registry:
+            registry.register(12345, graces=(5.0, 3.0, 2.0))
+            with patch("engine.processes.stop_process_group") as stop:
+                registry._handle_sigterm(signal.SIGTERM, None)
+                stop.assert_called_once_with(
+                    12345,
+                    process=None,
+                    graces=(5.0, 3.0, 2.0),
+                )
+            registry.unregister(12345)
+
     def test_check_flag_matches_subprocess_run_semantics(self):
         success = run_process_group(
             ["/bin/sh", "-c", "exit 0"],
