@@ -15,7 +15,10 @@ from engine.adapters.config import (
     ResourceLimits,
     TargetConfig,
 )
-from engine.fuzzing.provenance import verify_build_provenance
+from engine.fuzzing.provenance import (
+    _expected_adapter_build_commands,
+    verify_build_provenance,
+)
 
 
 class AdapterBuildProvenanceTests(unittest.TestCase):
@@ -69,7 +72,7 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
         self.cache = self.build_dir / "CMakeCache.txt"
         cache_values = {
             "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-            "CMAKE_C_COMPILER": "/usr/bin/afl-clang-fast",
+            "CMAKE_C_COMPILER": str(self.compiler),
             "CMAKE_GENERATOR": "Ninja",
             "CMAKE_MAKE_PROGRAM": "/usr/bin/ninja",
             "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -95,7 +98,7 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
         )
 
         self.database = self.build_dir / "compile_commands.json"
-        compiler = "/usr/bin/afl-clang-fast"
+        compiler = str(self.compiler)
         entries = [
             {
                 "directory": str(self.build_dir),
@@ -161,10 +164,16 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             "steps": [
                 {
                     "name": name,
+                    "command": command,
                     "status": "completed",
                     "exit_code": 0,
                 }
-                for name in ("configure", "library", "harness")
+                for name, command in zip(
+                    ("configure", "library", "harness"),
+                    _expected_adapter_build_commands(
+                        self.config, self.build_dir, compiler=self.compiler
+                    ),
+                )
             ],
             "environment": {
                 "AFL_USE_UBSAN": "1",
@@ -206,6 +215,8 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
                   self.source_archive_sha256),
             patch("engine.fuzzing.provenance.shutil.which",
                   return_value="/usr/bin/afl-fuzz"),
+            patch("engine.fuzzing.provenance._PINNED_COMPILER",
+                  self.compiler),
             patch("engine.fuzzing.provenance._run_bounded_version",
                   side_effect=version),
             patch("engine.fuzzing.provenance._read_bounded_file",
@@ -216,6 +227,18 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
     def test_accepts_completed_adapter_build(self):
         report = self.verify()
         self.assertTrue(report.passed, report.format())
+
+    def test_rejects_modified_harness_link_command(self):
+        self.metadata["steps"][2]["command"][1] = "-O0"
+        (self.build_dir / "build.json").write_text(json.dumps(self.metadata))
+
+        report = self.verify()
+
+        self.assertFalse(report.passed)
+        check = next(
+            item for item in report.checks if item.name == "build_steps"
+        )
+        self.assertEqual(check.status, "failed")
 
     def test_rejects_modified_build_binary(self):
         self.binary.write_bytes(b"modified executable")
