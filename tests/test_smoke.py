@@ -82,6 +82,7 @@ def _make_test_png(
     color_type: int = 6,
     interlace: int = 0,
     text_payloads: tuple[bytes, ...] = (),
+    text_payloads_after_idat: tuple[bytes, ...] = (),
     include_iend: bool = True,
     valid_image_data: bool = True,
 ) -> bytes:
@@ -102,6 +103,9 @@ def _make_test_png(
         image_data = zlib.compress(b"")
 
     data.extend(_test_png_chunk(b"IDAT", image_data))
+
+    for payload in text_payloads_after_idat:
+        data.extend(_test_png_chunk(b"tEXt", payload))
 
     if include_iend:
         data.extend(_test_png_chunk(b"IEND", b""))
@@ -157,11 +161,11 @@ class HarnessSmokeTests(unittest.TestCase):
                 width=8192, height=1, bit_depth=16
             ),
             "chunk_over_limit.png": _make_test_png(
-                text_payloads=(b"Comment\\0" + b"x" * (262145 - 8),)
+                text_payloads=(b"Comment\\x00" + b"x" * (262145 - 8),)
             ),
             "chunk_cache_over_limit.png": _make_test_png(
                 text_payloads=tuple(
-                    f"K{i:03d}".encode("ascii") + b"\\0v"
+                    f"K{i:03d}".encode("ascii") + b"\\x00v"
                     for i in range(130)
                 )
             ),
@@ -267,6 +271,35 @@ class HarnessSmokeTests(unittest.TestCase):
         self.assertEqual(valid.status, "failed")
         self.assertIn("CRC mismatch", valid.message)
         self.assertEqual(mocked_run.call_count, 12)
+
+    def test_rejects_tEXt_chunk_without_keyword_separator(self) -> None:
+        from engine.fuzzing.smoke import _validate_seed_fixture
+
+        path = self.seed_dir / "valid.png"
+        path.write_bytes(_make_test_png(text_payloads=(b"Comment text",)))
+        with self.assertRaisesRegex(ValueError, "NUL separator"):
+            _validate_seed_fixture("valid_png", path)
+
+    def test_chunk_cache_limit_counts_pre_and_post_idat_separately(self) -> None:
+        from engine.fuzzing.smoke import _validate_seed_fixture
+
+        before = tuple(
+            f"B{i:03d}".encode("ascii") + b"\x00v"
+            for i in range(70)
+        )
+        after = tuple(
+            f"A{i:03d}".encode("ascii") + b"\x00v"
+            for i in range(70)
+        )
+        path = self.seed_dir / "chunk_cache_over_limit.png"
+        path.write_bytes(
+            _make_test_png(
+                text_payloads=before,
+                text_payloads_after_idat=after,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "within either info structure"):
+            _validate_seed_fixture("chunk_cache_limit", path)
 
     def test_valid_smoke_run_executes_all_expected_cases(self) -> None:
         report, mocked_run = self.run_smoke_with_fake_process()
