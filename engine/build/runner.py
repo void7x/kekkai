@@ -381,6 +381,15 @@ def recover_failed_build(
         )
 
     archive_root = build_dir.parent / "failed-builds"
+    for label, protected in protected_paths:
+        if (
+            archive_root == protected
+            or archive_root in protected.parents
+            or protected in archive_root.parents
+        ):
+            raise BuildError(
+                f"Failed-build archive directory overlaps the {label}; recovery refused."
+            )
     if archive_root.is_symlink():
         raise BuildError("Failed-build archive directory is a symlink; recovery refused.")
     try:
@@ -388,7 +397,9 @@ def recover_failed_build(
         archive_info = archive_root.lstat()
         if not stat.S_ISDIR(archive_info.st_mode):
             raise BuildError("Failed-build archive path is not a plain directory.")
-        if archive_info.st_mode & 0o077:
+        if archive_info.st_uid != os.getuid():
+            raise BuildError("Failed-build archive directory must be owned by the current user.")
+        if stat.S_IMODE(archive_info.st_mode) != 0o700:
             raise BuildError("Failed-build archive directory must have mode 0700.")
     except BuildError:
         raise
