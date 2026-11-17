@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime as RealDateTime, timezone
@@ -215,6 +216,43 @@ class FailedBuildRecoveryTests(unittest.TestCase):
 
         self.assertTrue(self.build_dir.is_dir())
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "prior archive\n")
+
+    def test_refuses_failed_build_archive_owned_by_another_user(self):
+        archive_root = self.build_dir.parent / "failed-builds"
+        archive_root.mkdir(mode=0o700)
+        other_uid = os.getuid() + 1
+
+        with patch("engine.build.runner.os.getuid", return_value=other_uid):
+            with self.assertRaisesRegex(BuildError, "owned by the current user"):
+                recover_failed_build(self.config, self.root)
+
+        self.assertTrue(self.build_dir.is_dir())
+
+    def test_refuses_failed_build_archive_with_group_permissions(self):
+        archive_root = self.build_dir.parent / "failed-builds"
+        archive_root.mkdir(mode=0o700)
+        archive_root.chmod(0o750)
+
+        with self.assertRaisesRegex(BuildError, "mode 0700"):
+            recover_failed_build(self.config, self.root)
+
+        self.assertTrue(self.build_dir.is_dir())
+
+    def test_refuses_failed_build_archive_overlapping_campaign_output(self):
+        archive_root = self.build_dir.parent / "failed-builds"
+        archive_root.mkdir(mode=0o700)
+        self.config = __import__("dataclasses").replace(
+            self.config,
+            target=__import__("dataclasses").replace(
+                self.config.target,
+                output_parent=archive_root,
+            ),
+        )
+
+        with self.assertRaisesRegex(BuildError, "overlaps the campaign output"):
+            recover_failed_build(self.config, self.root)
+
+        self.assertTrue(self.build_dir.is_dir())
 
     def test_refuses_symlinked_metadata(self):
         metadata = self.build_dir / "build.json"
