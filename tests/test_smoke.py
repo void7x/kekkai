@@ -161,11 +161,11 @@ class HarnessSmokeTests(unittest.TestCase):
                 width=8192, height=1, bit_depth=16
             ),
             "chunk_over_limit.png": _make_test_png(
-                text_payloads=(b"Comment\\x00" + b"x" * (262145 - 8),)
+                text_payloads=(b"Comment\x00" + b"x" * (262145 - 8),)
             ),
             "chunk_cache_over_limit.png": _make_test_png(
                 text_payloads=tuple(
-                    f"K{i:03d}".encode("ascii") + b"\\x00v"
+                    f"K{i:03d}".encode("ascii") + b"\x00v"
                     for i in range(130)
                 )
             ),
