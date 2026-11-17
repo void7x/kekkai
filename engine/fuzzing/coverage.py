@@ -170,7 +170,7 @@ def _read_process_output(stream) -> tuple[int, str]:
     ).decode("utf-8", errors="replace")
 
     if start:
-        content = f"[Earlier output omitted: {start} bytes]\\n" + content
+        content = f"[Earlier output omitted: {start} bytes]\n" + content
 
     return size, content
 
@@ -288,6 +288,7 @@ def _parse_map(map_bytes: bytes) -> int:
             )
 
         location, value_text = match.groups()
+        location = location.upper()
 
         if location in seen_locations:
             raise ValueError(
