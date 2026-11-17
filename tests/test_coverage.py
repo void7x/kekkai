@@ -230,7 +230,7 @@ class CoverageTests(unittest.TestCase):
 
     def test_coverage_map_duplicate_locations_are_case_insensitive(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate coverage location"):
-            _parse_map(b"ABCDEF:1\\nabcdef:2\\n")
+            _parse_map(b"ABCDEF:1\nabcdef:2\n")
 
     def test_truncated_process_output_uses_real_line_break(self) -> None:
         with tempfile.TemporaryFile(mode="w+b") as stream:
@@ -238,8 +238,8 @@ class CoverageTests(unittest.TestCase):
             size, content = _read_process_output(stream)
 
         self.assertEqual(size, 5000)
-        self.assertTrue(content.startswith("[Earlier output omitted: 904 bytes]\\n"))
-        self.assertNotIn("\\\\n", content)
+        self.assertTrue(content.startswith("[Earlier output omitted: 904 bytes]\n"))
+        self.assertNotIn("\\n", content)
 
     def test_valid_coverage_and_repeatability(self) -> None:
         with patch.dict(os.environ, {"AFL_MAP_SIZE": "1", "LD_PRELOAD": "must-not-leak", "KEKKAI_TEST_SECRET": "must-not-leak"}):
