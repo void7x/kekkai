@@ -24,7 +24,8 @@ from engine.storage import StorageError, verify_campaign_storage
 from engine.fuzzing.provenance import verify_build_provenance
 from engine.fuzzing.smoke import run_harness_smoke
 from engine.processes import (
-    ProcessGroupRegistry, process_group_has_live_members, process_groups_guarded,
+    ProcessGroupRegistry, ProcessInterruptedError,
+    process_group_has_live_members, process_groups_guarded,
     signal_process_group, stop_process_group,
 )
 
@@ -248,6 +249,7 @@ def _execute_campaign(
     _process_registry: ProcessGroupRegistry,
 ) -> CampaignResult:
     """Execute one bounded AFL++ worker and preserve its campaign record."""
+    _process_registry.raise_if_interrupted()
     _require_campaign_storage(config)
     try:
         root = project_root.resolve(strict=True)
@@ -278,6 +280,7 @@ def _execute_campaign(
     afl_output_dir = campaign_dir / "afl-output"
 
     # Recheck immediately before the first write to the campaign filesystem.
+    _process_registry.raise_if_interrupted()
     _require_campaign_storage(config)
     try:
         campaign_dir.mkdir(mode=0o700)
@@ -337,6 +340,7 @@ def _execute_campaign(
     }
 
     try:
+        _process_registry.raise_if_interrupted()
         process = subprocess.Popen(
             command,
             cwd=root,
@@ -349,6 +353,13 @@ def _execute_campaign(
             start_new_session=True,
             bufsize=0,
         )
+    except ProcessInterruptedError:
+        message = "Campaign interrupted by SIGTERM before AFL++ started."
+        for filename in ("stdout.log", "stderr.log"):
+            (campaign_dir / filename).touch(mode=0o600, exist_ok=False)
+
+        status = CampaignState.INTERRUPTED
+        exit_code = None
     except OSError as exc:
         message = f"Could not start AFL++: {exc}"
         for filename in ("stdout.log", "stderr.log"):
@@ -357,7 +368,15 @@ def _execute_campaign(
         status = CampaignState.FAILED
         exit_code = None
     else:
-        _process_registry.register(process.pid, process=process)
+        _process_registry.register(
+            process.pid,
+            process=process,
+            graces=(
+                _INTERRUPT_GRACE_SECONDS,
+                _TERMINATE_GRACE_SECONDS,
+                _TERMINATE_GRACE_SECONDS,
+            ),
+        )
         metadata["pid"] = process.pid
 
         assert process.stdout is not None
