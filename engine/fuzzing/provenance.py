@@ -331,11 +331,13 @@ def _verify_adapter_build_provenance(
         if not isinstance(artifact_hashes, dict):
             raise ValueError("Build metadata has no artifact hash mapping.")
 
+        artifact_contents: dict[str, bytes] = {}
         for key, artifact_path in expected_artifacts.items():
             expected_hash = artifact_hashes.get(key)
             artifact_bytes = _read_bounded_file(
                 artifact_path, _MAX_BUILD_FILE_BYTES
             )
+            artifact_contents[key] = artifact_bytes
             actual_hash = hashlib.sha256(artifact_bytes).hexdigest()
             valid = (
                 isinstance(expected_hash, str)
@@ -350,9 +352,7 @@ def _verify_adapter_build_provenance(
                 else f"SHA-256 mismatch; observed {actual_hash}.",
             )
 
-        cache_text = _read_bounded_file(
-            build_dir / "CMakeCache.txt", _MAX_BUILD_FILE_BYTES
-        ).decode("utf-8")
+        cache_text = artifact_contents["cmake_cache_sha256"].decode("utf-8")
         expected_cache = {
             "CMAKE_BUILD_TYPE": "RelWithDebInfo",
             "CMAKE_C_COMPILER": str(_PINNED_COMPILER),
@@ -385,9 +385,7 @@ def _verify_adapter_build_provenance(
                 f"Expected {expected}; observed {matches!r}.",
             )
 
-        header_text = _read_bounded_file(
-            build_dir / "pnglibconf.h", _MAX_BUILD_FILE_BYTES
-        ).decode("utf-8")
+        header_text = artifact_contents["generated_header_sha256"].decode("utf-8")
         required_features = (
             "PNG_READ_SUPPORTED",
             "PNG_SEQUENTIAL_READ_SUPPORTED",
@@ -406,10 +404,7 @@ def _verify_adapter_build_provenance(
             )
 
         database = json.loads(
-            _read_bounded_file(
-                build_dir / "compile_commands.json",
-                _MAX_BUILD_FILE_BYTES,
-            )
+            artifact_contents["compile_database_sha256"]
         )
         database_valid = isinstance(database, list) and len(database) == 17
         compiler = _PINNED_COMPILER.resolve(strict=True)
