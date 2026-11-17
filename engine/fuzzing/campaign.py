@@ -143,7 +143,17 @@ def _write_metadata(campaign_dir: Path, metadata: dict) -> None:
         with temporary.open("x", encoding="utf-8") as stream:
             json.dump(metadata, stream, indent=2, sort_keys=True)
             stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, destination)
+        directory_fd = os.open(
+            campaign_dir,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         try:
             temporary.unlink()
@@ -312,7 +322,12 @@ def _execute_campaign(
         "exit_code": None,
         "message": "Campaign initialized.",
     }
-    _write_metadata(campaign_dir, metadata)
+    try:
+        _write_metadata(campaign_dir, metadata)
+    except OSError as exc:
+        raise CampaignError(
+            f"Could not persist initial campaign metadata in {campaign_dir}: {exc}"
+        ) from exc
 
     child_environment = {
         "PATH": os.defpath,
@@ -436,7 +451,14 @@ def _execute_campaign(
         "message": message,
         "log_errors": log_errors,
     })
-    _write_metadata(campaign_dir, metadata)
+    try:
+        _write_metadata(campaign_dir, metadata)
+    except OSError as exc:
+        raise CampaignError(
+            "Campaign process ended, but final metadata could not be durably "
+            f"persisted in {campaign_dir}; the last durable metadata may still "
+            f"show a running campaign: {exc}"
+        ) from exc
 
     return CampaignResult(
         campaign_id=campaign_id,
