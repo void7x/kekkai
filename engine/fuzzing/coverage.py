@@ -10,7 +10,7 @@ import shutil
 import stat
 import subprocess
 
-from engine.processes import run_process_group
+from engine.processes import ProcessInterruptedError, run_process_group
 import tempfile
 import time
 from dataclasses import dataclass
@@ -539,6 +539,8 @@ def validate_coverage(
                 elapsed,
                 _bounded_text(exc.stderr),
             )
+        except ProcessInterruptedError:
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
             elapsed = time.monotonic() - started
             return _failed_case(
