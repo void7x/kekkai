@@ -119,8 +119,9 @@ def _run_bounded_version(command: list[str]) -> tuple[int, str]:
         tempfile.TemporaryFile(mode="w+b") as stdout_file,
         tempfile.TemporaryFile(mode="w+b") as stderr_file,
     ):
-        result = subprocess.run(
+        result = run_process_group(
             command,
+            cwd=Path.cwd(),
             stdin=subprocess.DEVNULL,
             stdout=stdout_file,
             stderr=stderr_file,
