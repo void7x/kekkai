@@ -226,5 +226,49 @@ class AdapterConfigTests(unittest.TestCase):
             load_adapter_config(self.config_path, self.config_path)
 
 
+    def test_rejects_symlinked_harness_source(self) -> None:
+        real = self.root / "real-harness.c"
+        real.write_text("/* target */\n", encoding="utf-8")
+        link = self.root / "harness-link.c"
+        link.symlink_to(real)
+        content = VALID_TOML.replace(
+            'harness_source = "targets/libpng/png_read_harness.c"',
+            'harness_source = "harness-link.c"',
+        )
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load(content)
+
+    def test_rejects_symlinked_harness_binary(self) -> None:
+        build_dir = (
+            self.root
+            / "../kekkai-work/builds/libpng-1.6.59-afl-ubsan-phase2-clean"
+        ).resolve()
+        build_dir.mkdir(parents=True)
+        real = self.root / "real-harness-binary"
+        real.write_bytes(b"binary")
+        (build_dir / "kekkai_png_harness").symlink_to(real)
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load()
+
+    def test_rejects_symlinked_seed_directory(self) -> None:
+        work = (self.root / "../kekkai-work").resolve()
+        work.mkdir(exist_ok=True)
+        real = work / "real-seeds"
+        real.mkdir()
+        (work / "seeds").symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load()
+
+    def test_rejects_symlinked_build_directory(self) -> None:
+        work_builds = (self.root / "../kekkai-work/builds").resolve()
+        work_builds.mkdir(parents=True, exist_ok=True)
+        real = work_builds / "real-build"
+        real.mkdir()
+        link = work_builds / "libpng-1.6.59-afl-ubsan-phase2-clean"
+        link.symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load()
+
+
 if __name__ == "__main__":
     unittest.main()
