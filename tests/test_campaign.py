@@ -917,5 +917,42 @@ if result.status != CampaignState.INTERRUPTED:
             build_campaign_command(self.config, self.fuzzer, existing)
 
 
+    def test_campaign_metadata_fsyncs_file_and_directory(self):
+        with patch(
+            "engine.fuzzing.campaign.os.fsync",
+            wraps=os.fsync,
+        ) as fsync:
+            result = self.run_fake_campaign("exit 0\n")
+
+        self.assertEqual(result.status, CampaignState.COMPLETED)
+        # Initial metadata, PID metadata and final metadata each sync both
+        # the temporary file and the containing campaign directory.
+        self.assertGreaterEqual(fsync.call_count, 6)
+
+    def test_final_metadata_write_failure_is_not_reported_as_success(self):
+        from engine.fuzzing import campaign as campaign_module
+
+        original_writer = campaign_module._write_metadata
+        calls = 0
+
+        def fail_final_write(campaign_dir, metadata):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("simulated final metadata sync failure")
+            return original_writer(campaign_dir, metadata)
+
+        with patch(
+            "engine.fuzzing.campaign._write_metadata",
+            side_effect=fail_final_write,
+        ):
+            with self.assertRaisesRegex(
+                CampaignError,
+                "final metadata could not be durably persisted",
+            ):
+                self.run_fake_campaign("exit 0\n")
+
+        self.assertEqual(calls, 3)
+
 if __name__ == "__main__":
     unittest.main()
