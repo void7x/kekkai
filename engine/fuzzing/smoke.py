@@ -331,12 +331,12 @@ def _validate_seed_fixture(case_name: str, path: Path) -> None:
     ]
     text_lengths = [len(payload) for payload in text_payloads]
     for payload in text_payloads:
-        separator = payload.find(b"\\x00")
+        separator = payload.find(b"\x00")
         if separator < 1 or separator > 79:
             raise ValueError(
                 "tEXt keyword must have a NUL separator after 1 to 79 bytes."
             )
-        if b"\\x00" in payload[separator + 1:]:
+        if b"\x00" in payload[separator + 1:]:
             raise ValueError("tEXt text field must not contain a NUL byte.")
 
     if compression != 0 or filtering != 0:
