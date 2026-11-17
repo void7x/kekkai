@@ -326,9 +326,18 @@ def _validate_seed_fixture(case_name: str, path: Path) -> None:
     ihdr, chunks, has_iend = _inspect_png_fixture(data)
     width, height, bit_depth, color_type, compression, filtering, interlace = ihdr
     chunk_types = [kind for kind, _ in chunks]
-    text_lengths = [
-        len(payload) for kind, payload in chunks if kind == b"tEXt"
+    text_payloads = [
+        payload for kind, payload in chunks if kind == b"tEXt"
     ]
+    text_lengths = [len(payload) for payload in text_payloads]
+    for payload in text_payloads:
+        separator = payload.find(b"\\x00")
+        if separator < 1 or separator > 79:
+            raise ValueError(
+                "tEXt keyword must have a NUL separator after 1 to 79 bytes."
+            )
+        if b"\\x00" in payload[separator + 1:]:
+            raise ValueError("tEXt text field must not contain a NUL byte.")
 
     if compression != 0 or filtering != 0:
         raise ValueError("PNG compression and filter methods must be zero.")
@@ -363,6 +372,14 @@ def _validate_seed_fixture(case_name: str, path: Path) -> None:
             raise ValueError("Height fixture does not exceed the 8192-pixel limit.")
 
     elif case_name == "pixel_limit":
+        if (
+            width < 1 or height < 1
+            or width > _MAX_IMAGE_WIDTH
+            or height > _MAX_IMAGE_HEIGHT
+        ):
+            raise ValueError(
+                "Pixel-limit fixture must remain within individual dimension limits."
+            )
         if width * height <= _MAX_TOTAL_PIXELS:
             raise ValueError("Pixel fixture does not exceed the total-pixel limit.")
 
@@ -384,8 +401,18 @@ def _validate_seed_fixture(case_name: str, path: Path) -> None:
         _validate_png_image_data(ihdr, chunks)
 
     elif case_name == "chunk_cache_limit":
-        if len(text_lengths) <= _MAX_CACHED_CHUNKS:
-            raise ValueError("Fixture does not exceed the 128-chunk cache limit.")
+        idat_index = chunk_types.index(b"IDAT")
+        before_idat = sum(
+            1 for kind, _ in chunks[:idat_index] if kind == b"tEXt"
+        )
+        after_idat = sum(
+            1 for kind, _ in chunks[idat_index + 1:] if kind == b"tEXt"
+        )
+        if max(before_idat, after_idat) <= _MAX_CACHED_CHUNKS:
+            raise ValueError(
+                "Fixture does not exceed the 128-chunk cache limit "
+                "within either info structure."
+            )
         _validate_png_image_data(ihdr, chunks)
 
     else:
