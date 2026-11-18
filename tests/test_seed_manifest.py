@@ -33,14 +33,13 @@ class SeedManifestTests(unittest.TestCase):
         self.assertEqual(first.seed_count, 2)
         self.assertEqual(first.total_bytes, 9)
 
-    def test_plain_direct_subdirectories_are_ignored_consistently_with_preflight(self):
+    def test_rejects_direct_subdirectories(self):
         (self.seeds / "valid.png").write_bytes(b"input")
         nested = self.seeds / "nested"
         nested.mkdir()
         (nested / "not-a-direct-seed").write_bytes(b"ignored")
-        manifest = build_seed_manifest(self.seeds)
-        self.assertEqual(manifest.seed_count, 1)
-        self.assertEqual(manifest.entries[0][0], "valid.png")
+        with self.assertRaisesRegex(SeedManifestError, "Subdirectories"):
+            build_seed_manifest(self.seeds)
 
     def test_rejects_symlink_entries(self):
         target = self.root / "outside"
