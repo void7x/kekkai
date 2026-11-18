@@ -1,241 +1,363 @@
 # P3-03 Design: Bounded ASan/UBSan Evidence Collection
 
-**Status:** Draft; pending one independent read-only design review and project-owner approval.  
-**Base:** `development` at `64db5c3050fd68ac601dd189b89b1c6e3f574e0e`  
-**Feature branch:** `feature/p3-03-sanitizer-evidence`  
-**Scope:** Build one verified ASan+UBSan diagnostic profile for the pinned libpng 1.6.59 adapter, execute one selected imported AFL observation once, and preserve the result as immutable evidence.  
+**Status:** Review-corrected draft. Pending project-owner design approval and a real WSL 2 resource-boundary acceptance check. This document does not authorize implementation.  
+**Base:** development at 64db5c3050fd68ac601dd189b89b1c6e3f574e0e  
+**Feature branch:** feature/p3-03-sanitizer-evidence  
+**Original reviewed draft:** 48ea0ab19467844a997152566e2c8ecca591d067  
+**Scope:** Build one verified ASan+UBSan diagnostic profile for pinned libpng 1.6.59, execute one selected imported AFL observation once, and preserve the result as immutable evidence.  
 **Dependencies:** P3-01 evidence store and P3-02 AFL observation ingestion. No new third-party runtime dependency is proposed.
 
-## 1. Goal
+## 1. Goal and evidence meaning
 
 Collect reproducible sanitizer evidence for one existing P3-02 observation without changing its original testcase or campaign record.
 
-A successful collection records:
+A successful attempt links the exact diagnostic build, selected observation and original testcase artifact, fixed command and environment, execution and resource-limit facts, and captured stdout/stderr artifacts. A recognized output marker is candidate evidence for review, not a confirmed defect or vulnerability. No recognized marker does not prove that the input is safe or that no defect exists.
 
-1. The exact separately built ASan+UBSan diagnostic build and its verified provenance.
-2. The exact original testcase artifact selected by observation UID.
-3. The command, fixed sanitizer environment, start/end time, process exit code or terminating signal, timeout/interruption state and output-truncation state.
-4. The raw stdout and stderr as immutable content-addressed artifacts.
-5. A conservative indication of whether a recognized sanitizer report signature appeared in the captured output.
+## 2. Decisions made after the independent review
 
-A sanitizer report signature is evidence to review, not a confirmed defect or vulnerability. A run with no recognized signature is not proof that the input is safe or that no defect exists.
+The original review identified three blockers. This revision makes these design decisions:
 
-## 2. Current-code findings
+- **B01, bounded execution:** Use only a transient per-user systemd service, not a transient scope and not post-launch PID migration. The systemd manager must create the service cgroup and apply resource properties before executing a trusted pre-exec guard. The guard verifies the active limits and migration permissions before dispatching the harness. Any failed or unprovable check blocks execution.
+- **B02, effective instrumentation:** Approve Clang 21.1.8, matching the existing recorded Phase 2 diagnostic build. Verify the exact 17-source set, tokenized compile/link commands, absence of sanitizer overrides, exact archive membership, runtime identity and executable sanitizer behavior. Flag presence alone is insufficient.
+- **B03, attempt recovery:** Register a fully verified diagnostic build as completed before collection. Create a durable per-attempt recovery manifest before execution. Distinguish preflight blocks from harness executions, and record capture completeness separately from retention truncation and artifact publication. Preserve unpublished stream data. Complete recordable workload cleanup before inserting the immutable final row.
 
-- P3-01 provides immutable content-addressed artifacts, immutable observations, target/version/build/campaign foreign keys, and build roles `fuzz`, `diagnostic_replay` and `control`.
-- P3-02 imports only terminal schema-v2 AFL++ campaign crashes and hangs. Each observation links to the original testcase artifact and the exact fuzz build and campaign.
-- The current `observations` table intentionally models AFL crash/hang facts. It has no sanitizer execution result, raw diagnostic output or diagnostic-build link.
-- The current AFL build profile uses `afl-clang-fast` with UBSan trap mode. It is not the ASan+UBSan diagnostic profile and must not be reused as one.
-- The Phase 2 verification record documents an earlier separate ASan+UBSan build and retained-corpus replay. That manual run did not create P3-03-compatible per-observation database records or a reusable machine-readable execution manifest.
-- The evidence migration framework is checksum-pinned, transactional and backs up an existing database before applying a new migration.
+The systemd approach is conditional, not assumed to work on WSL 2. WSL support for systemd does not prove that the user manager can apply the required resource controllers or that the workload cannot migrate outside the bounded cgroup. The real WSL integration gate in Section 12 is mandatory. There is no unbounded fallback.
 
-## 3. Scope and explicit boundaries
+## 3. Existing architecture and constraints
+
+- P3-01 provides immutable content-addressed artifacts, immutable observations, target/version/build/campaign relationships, and build roles fuzz, diagnostic_replay and control.
+- P3-02 imports terminal schema-v2 AFL++ crashes and hangs. Each observation links to its original testcase artifact, exact fuzz build and campaign.
+- The observations table records AFL facts; it does not model sanitizer execution or diagnostic output.
+- The AFL build uses afl-clang-fast and UBSan trap mode. It is not the diagnostic profile and must not be reused.
+- The prior diagnostic record documents a separate Clang 21.1.8 ASan+UBSan build of all 17 libpng C translation units and the repository harness. The retained 262-entry corpus replay completed without a detected sanitizer report. System zlib 1.3.1 was not instrumented.
+- The existing repository supports immutable build registration. The diagnostic build must be registered with completed status before collection starts.
+- The migration system is checksum-pinned, transactional and performs a pre-migration backup. Existing orphan detection in the evidence store must be reused. Do not alter migration 001 or the existing migration framework's guarantees.
+
+## 4. Scope and threat boundary
 
 ### In scope
 
-- One fixed libpng 1.6.59 diagnostic build using ordinary Clang, not AFL++ compiler wrappers.
-- A one-observation, one-process diagnostic execution selected by an existing P3-02 `observation_uid`.
-- A new immutable database record for each execution attempt.
-- Preservation of both process output streams as evidence artifacts.
-- Conservative recognition of AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer report signatures.
-- Resource, filesystem, process-lifecycle, provenance and migration checks.
-- Unit and integration tests for success, failure, timeout, interruption, truncation, malformed evidence and retry behavior.
+- One fixed libpng 1.6.59 diagnostic build using ordinary Clang 21.1.8.
+- One harness execution selected by an existing P3-02 observation UID.
+- An immutable attempt record for each execution and each recorded preflight block.
+- Bounded raw output preservation, sanitizer marker classification and recovery of partial publication.
+- Resource, filesystem, provenance, process-lifecycle and migration checks.
+- Unit tests plus a separately reported real WSL environment gate.
 
 ### Out of scope
 
-- Starting AFL++, importing queue entries, or importing schema-v1 campaigns.
-- Replaying every observation automatically or running parallel replay workers.
-- Replaying queue entries that were not imported as P3-02 observations.
-- General-purpose replay across arbitrary commands, targets, versions or build profiles.
-- Multiple-attempt reproduction policy, cross-version comparison, minimization, crash grouping or root-cause analysis.
-- CASR, symbolication pipelines, UI, networking, AI, or a new runtime dependency.
-- Any vulnerability, severity, exploitability or fixed/not-fixed verdict.
+- Starting AFL++, importing queue entries, schema-v1 campaigns or unimported testcases.
+- Batch or parallel replay, arbitrary targets/commands, P3-04's general replay engine, minimization, grouping, root-cause analysis or vulnerability verdicts.
+- UI, networking, AI, CASR, symbolication pipeline or new runtime dependencies.
+- Defending the host against an intentional same-UID escape or a successful arbitrary-code-execution exploit in the target.
 
-P3-03 provides a narrow diagnostic execution primitive only. P3-04 remains responsible for the broader reproduction/replay engine.
+**Threat model limitation:** WSL 2 is not a security boundary. This design treats the fixed local harness and target as non-hostile programs that may crash, hang, fork accidentally or consume resources, but are not deliberately trying to attack the user manager or escape as the same UID. The cgroup is a resource-control boundary, not a hostile-code sandbox. Risky samples or deliberate escape testing require a separately approved isolated VM design. This is consistent with the project's workflow decisions.
 
-## 4. Operator interface
+P3-03 supplies one narrow diagnostic execution primitive. P3-04 remains responsible for the broader reproduction/replay engine.
+
+## 5. Operator commands and durable attempt staging
 
 Provide two fixed-purpose commands:
 
-- Build: `scripts/build_libpng_diagnostic.py --config targets/libpng/adapter.toml --project-root <absolute-repository-path> --build-dir <absolute-clean-build-path>`
-- Collect one observation: `scripts/collect_sanitizer_evidence.py --evidence-root <absolute-evidence-root> --diagnostic-build-dir <absolute-build-path> --observation-uid <obs-uid>`
+- Build a diagnostic profile using the approved adapter, repository root and a new build directory.
+- Collect one observation using the evidence root, registered diagnostic-build identifier and one observation UID.
 
-The build directory must be new, user-owned, non-symlinked and outside the repository, target source, campaign output, and evidence-store roots. It must not overlap the existing AFL build directory. Build output and temporary execution input remain outside Git.
+The build directory must be new, user-owned, non-symlinked, outside the repository, source tree, campaign output and evidence root, and distinct from the AFL build directory. Build output and execution input remain outside Git.
 
-The collection command accepts one valid observation UID and one verified diagnostic build. It does not accept a user-supplied executable, shell command, environment override, arbitrary argument list, input path or timeout override. The target binary and original input are derived from verified build and evidence-store records.
+The collection command does not accept a user-supplied executable, shell command, environment override, argument list, input path, timeout or resource-limit override. It derives the executable and input from verified build and evidence records.
 
-If the evidence database contains no imported P3-02 observations, collection reports that no eligible observation exists. It must not fabricate a testcase or use an AFL queue entry as a crash/hang observation.
+After validating the selected observation and completed diagnostic build, allocate a fresh lowercase UUIDv4 run UID and create an exclusive attempt directory in a dedicated recovery directory adjacent to, but outside, the evidence-store root. The recovery directory is owned by the current user, non-symlinked, mode 0700, on a filesystem with a verified free-space reserve. Files inside it are mode 0600 and exclusively created. It must not overlap the repository, source tree, campaign or evidence-store objects.
 
-## 5. Diagnostic build contract
+Before launching systemd or the harness, write and fsync a versioned recovery manifest containing run UID, observation UID, diagnostic build ID, original artifact digest, policy identifier, intended command, requested resource limits, attempt timestamps and current state. Atomically update and fsync it as the attempt advances.
 
-Use a separate clean CMake/Ninja build directory for the same authenticated libpng 1.6.59 source tree and the repository-owned harness.
+Bound the recovery directory by a documented per-attempt size ceiling and a small configurable count of unresolved attempts. Never automatically delete unresolved attempts. Refuse another collection if an unresolved attempt exists or the recovery quota would be exceeded, and display the exact recovery path. Recovery staging is separate from the evidence store's internal ingestion staging; it must not use names or paths that the store's stale-ingest cleanup could remove.
 
-- Compiler: the installed ordinary `/usr/bin/clang` (not `afl-clang-fast`); record the resolved executable path and exact version output.
-- CMake build type: `RelWithDebInfo`.
-- Compile every libpng translation unit and the harness with `-fsanitize=address,undefined -fno-omit-frame-pointer -g`.
-- Link the harness with `-fsanitize=address,undefined` using Clang as the final linker driver so the sanitizer runtimes are linked.
-- Do not set `AFL_USE_UBSAN`, `AFL_USE_ASAN` or AFL instrumentation options in this profile.
-- Retain the current libpng build options, generated-header feature checks, harness source identity, pinned source archive/tree identity and system zlib 1.3.1 resolution.
-- System zlib remains an uninstrumented external dependency and must be stated in the build metadata and report.
-- Record a separate profile identifier such as `libpng-asan-ubsan`, `build_role='diagnostic_replay'`, the exact compiler/tool versions, CMake cache, compile database, harness/library hashes, commands, environment and terminal build state in schema-v2 `build.json`.
-- Verify all 17 libpng compile-database entries contain the ASan+UBSan instrumentation flags; verify the harness compile/link command contains the same sanitizer set and frame-pointer/debug flags; verify the executable and all expected build artifacts are regular files with recorded hashes.
-- Reject an existing build directory. A change in source, compiler, flags or sanitizer profile requires a new clean build directory.
+A missing eligible observation is reported as such. Do not fabricate a testcase or treat an AFL queue entry as an imported crash/hang observation.
 
-The diagnostic build must be verified independently. Do not accept a directory merely because it contains a file named `kekkai_png_harness`.
+## 6. Diagnostic build contract
 
-## 6. One-observation execution contract
+Use a separate clean CMake/Ninja directory for the authenticated libpng 1.6.59 source tree and repository-owned harness.
 
-Before launching the process:
+### Approved toolchain
 
-1. Open the evidence store using the existing protections and verify the store and selected artifact.
-2. Resolve the observation UID to its row, source campaign, source fuzz build and original artifact. Require the observation, campaign and source build to agree on target/version/build/campaign identity.
-3. Require the source build role to be `fuzz`, the diagnostic build role to be `diagnostic_replay`, and both builds to identify the same libpng target version and authenticated source-tree identity.
-4. Verify the diagnostic build metadata digest and the executable hash against the registered build record.
-5. Require the original artifact to be a verified regular content-addressed object and no larger than the originating campaign's recorded `max_input_bytes` (the current adapter limit is 8 MiB).
-6. Verify all evidence/build/temp paths are outside the repository and do not overlap each other or protected source/campaign paths.
+- Compiler: ordinary /usr/bin/clang, not afl-clang-fast.
+- Approved upstream version: Clang 21.1.8, matching the recorded prior diagnostic build.
+- Resolve the executable and record its path, SHA-256, complete version output, LLVM version, package identity/version/architecture and Clang resource directory.
+- Record SHA-256 and resolved paths for the ASan and UBSan runtimes selected from that resource directory, plus their supplying package identities.
+- A different compiler patch version, compiler binary digest, runtime package set or path is not silently accepted. Supporting another version requires an approved toolchain-policy change.
+- Record exact CMake and Ninja paths, versions and executable hashes.
+- Build type: RelWithDebInfo.
+- Use the authenticated libpng source archive/tree identity and exact repository harness identity.
+- Keep the existing libpng build options, generated-header feature checks and system zlib 1.3.1 resolution. System zlib remains uninstrumented and this limitation is recorded.
 
-Materialize only the selected original artifact into a new private, mode-0700 temporary directory outside the repository/evidence root. Verify the materialized bytes against the observation's artifact SHA-256 before execution. Never modify the original campaign file or the immutable evidence-store object.
+### Effective compile and link verification
 
-Launch only the verified harness binary with the temporary testcase path as its single input argument. Use an argument array, `shell=False`, a minimal fixed environment and a new process session. Record the exact command and environment. The environment must explicitly set:
+Compile exactly the expected 17 libpng C translation units, once each, and the repository harness with the required ASan+UBSan options, frame pointers and debug information. Link the harness with the same sanitizer set using Clang as the final linker driver.
 
-- `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1`
-- `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`
-- a minimal deterministic `PATH` and `LC_ALL=C`
+Parse compile_commands.json as structured JSON. Verify argv tokens. If only a command string is available, tokenize it once with a documented parser and reject ambiguous or unparseable commands. Do not use substring checks as proof of effective flags.
 
-No inherited `LD_PRELOAD`, AFL variables, user-provided environment or shell expansion is permitted. If the approved symbolizer path is available, verify and record it before adding `ASAN_SYMBOLIZER_PATH`; otherwise preserve raw output and record that symbolization was unavailable. Never discard raw output after symbolization.
+The verifier must:
 
-Use one process per invocation. Apply a fixed wall-clock watchdog (5 seconds), a CPU-time limit (3 seconds), a private temporary directory and the existing process-group TERM/KILL cleanup mechanism. Capture stdout and stderr separately, retaining at most 8 MiB per stream and recording whether either stream was truncated. Continue draining after the retention limit so a child cannot block on a full pipe.
+- Match the normalized source set against the exact 17 expected source paths, once each, with a unique object destination for every source.
+- Confirm the compiler path resolves to the approved Clang executable.
+- Reject compiler launchers, wrappers, plugins, injected compiler loads, unapproved Clang config, response files and unexpected argument indirection.
+- Reject effective-option overrides including -fno-sanitize, sanitizer trap mode, minimal runtime, no-runtime-linking, sanitizer ignorelists/blacklists and equivalent conflicting options, regardless of option order.
+- Verify the harness compile and final link commands use the same approved Clang driver, the exact newly built libpng archive and the required sanitizer flags. Reject a second or alternate libpng archive.
+- Inspect the static archive member list and map its 17 object members to the expected compile outputs. Reject missing, duplicate or unexpected members.
+- Inspect object/archive and harness symbols for expected ASan instrumentation references and UBSan handlers where source operations generate checks. Do not require every translation unit to reference a UBSan handler when it contains no UBSan-checkable operation.
+- Run disposable compiler/runtime self-tests: one known ASan violation and one known UBSan violation. Both must produce the expected family marker and non-zero termination. These probes verify the toolchain, not the target; they are not sanitizer-run records.
+- Verify the harness, archive, generated headers, CMake cache, compile database and required outputs are regular non-symlink files with recorded sizes and SHA-256 values.
 
-### ASan address-space and memory-limit requirement
+Do not require a shared libasan entry or use ldd as the sole test. Clang may link sanitizer runtimes statically; link-driver/runtime provenance and controlled runtime probes establish the intended runtime behavior.
 
-Do not apply `RLIMIT_AS` to the ASan process. ASan reserves a large virtual-address range on 64-bit systems, so an address-space limit can reject ASan's shadow mapping even when actual resident-memory use is small.
+Record profile libpng-asan-ubsan, build role diagnostic_replay, source identity, compiler/runtime identities, compile database, normalized source set, archive members, effective commands, environment, zlib limitation, terminal build state and artifact hashes in build metadata. Keep the existing schema-v2 build contract compatible and add diagnostic-specific fields without changing AFL profile interpretation.
 
-Before launch, require a usable cgroup v2 memory boundary for the diagnostic child. The implementation must use an existing delegated/private child cgroup with a finite `memory.max` no greater than the approved 1 GiB ceiling, and must verify the limit is active for the launched process. It must not require root, modify a parent/system cgroup, disable host security controls or silently continue without the memory ceiling. If safe cgroup setup or verification is unavailable, refuse the execution before launching the harness and preserve a clear blocked result; do not substitute `RLIMIT_AS` or an unbounded run.
+Reject an existing build directory. A changed source, compiler, flags or sanitizer profile requires a new clean directory.
 
-The exact cgroup delegation and cleanup approach must be checked on the user's WSL 2 environment during implementation. This is a design gate, not an assumption that the current WSL environment already provides delegation.
+### Build registration order
 
-## 7. Sanitizer output interpretation
+Only after the build succeeds and every verification passes, register it through the existing immutable build repository path with role diagnostic_replay and status completed. Link it to the registered libpng target/version and exact source-tree identity. Do not register a failed or partially verified build as completed. The collector accepts only a registered completed diagnostic build; it never registers a build after executing the target.
 
-Preserve raw bytes from stdout and stderr. Do not trust decoded text, a process exit code or a signal alone as a sanitizer diagnosis.
+## 7. One-observation execution and resource boundary
 
-The initial bounded classifier recognizes only these report signatures:
+### Preflight validation
 
-- AddressSanitizer: `ERROR: AddressSanitizer:`
-- LeakSanitizer: `ERROR: LeakSanitizer:`
-- UndefinedBehaviorSanitizer: the Clang UBSan `runtime error:` diagnostic marker.
+Before starting the service:
 
-Store the matching family names as a sorted canonical JSON array. Treat these matches as report signatures observed in process output, not proof that the target contains a security defect. A future parser may extract structured stack frames, but P3-03 must retain and cite the raw logs as the authoritative evidence.
+1. Open and verify the evidence store.
+2. Resolve the observation UID to its observation, source campaign, source fuzz build and original artifact. Require all target/version/build/campaign identities to agree.
+3. Require source role fuzz, diagnostic role diagnostic_replay, completed diagnostic status, matching libpng target version and authenticated source-tree identity.
+4. Reverify diagnostic metadata digest, compiler/runtime identities, harness executable and archive hashes against the registered build.
+5. Verify the original artifact is a regular content-addressed object and does not exceed the originating campaign's recorded max_input_bytes (currently 8 MiB).
+6. Validate absolute, non-symlinked, non-overlapping build, evidence, source, campaign, recovery and temporary paths.
+7. Verify recovery capacity and filesystem reserve; refuse if prior unresolved attempt data remains.
 
-Use a separate assessment field:
+Materialize only the selected original artifact into the private attempt directory. Create input/output files exclusively with mode 0600 and no-follow semantics. Re-hash the input immediately before execution. Never modify the original campaign testcase or evidence-store object.
 
-- `report_signature_observed`: at least one recognized marker is present in the retained output. This remains a candidate report for review.
-- `no_signature_observed`: process exited with code 0 and neither stream was truncated.
-- `inconclusive`: timeout, interruption, launch failure, non-zero exit without a recognized marker, signal without a recognized marker, or truncated output without a recognized marker.
+### Sole launch mechanism: transient systemd user service
 
-A signal or non-zero exit without a recognized sanitizer signature is not relabeled as an ASan/UBSan finding. A recognized signature remains report evidence even if the process later times out or its output is truncated. No-report status means only that this one execution produced no recognized signature in complete captured output.
+P3-03 v1 uses systemd-run --user to create a unique transient **.service** unit. It must not use --scope, which runs the command in the caller, and must not start the harness with Popen and then migrate its PID. The manager must create the service cgroup and apply controls before executing the command.
 
-## 8. Database extension
+Prerequisites include unified cgroup v2, a reachable user systemd manager, and available memory, swap, CPU and pids controllers with the necessary user-service properties. The implementation verifies actual systemd version and property support. WSL systemd availability alone is not enough. No root, sudo, parent/system cgroup modification, manual controller enabling or unbounded fallback is allowed.
 
-Add checksum-pinned migration `002_sanitizer_runs.sql`. Do not alter migration 001 or rewrite existing targets, builds, campaigns, artifacts or observations.
+Use service Type=exec and systemd-run --pipe --wait. The fixed policy requests:
 
-Add immutable table `sanitizer_runs` with at least:
+- MemoryMax=1G and MemoryAccounting=yes.
+- MemorySwapMax=0.
+- CPUQuota=60% and CPUQuotaPeriodSec=100ms.
+- RuntimeMaxSec=5s.
+- TasksMax=32.
+- KillMode=control-group, TimeoutStopSec=1s and SendSIGKILL=yes.
+- LimitCORE=0 and Delegate=no.
 
-- generated `run_uid` (unique, fixed-format identifier);
-- `target_id`, `target_version_id`, `source_build_id`, `campaign_id` and `observation_id`;
-- `diagnostic_build_id`;
-- `original_artifact_id`, `stdout_artifact_id` and `stderr_artifact_id`;
-- exact `command_json` and fixed `environment_json`;
-- execution status (`exited`, `signaled`, `timed_out`, `interrupted`, `launch_failed`);
-- nullable exit code and terminating signal, with checks preventing contradictory values;
-- sorted `sanitizer_families_json` and the assessment from Section 7;
-- stdout/stderr truncation flags;
-- normalized UTC start, end and record timestamps.
+CPUQuota=60% limits the service to roughly 60% of one CPU. Together with the five-second service runtime ceiling, this is approximately three CPU-seconds, subject to kernel quota-period accounting. It is a cgroup-wide rate limit, not a per-process RLIMIT_CPU guarantee. Memory and swap are separate limits and both must be read back.
 
-Use composite foreign keys to prove that the source observation belongs to the recorded source build, target/version and campaign, and that the diagnostic build belongs to the same target/version. Add an insert trigger that rejects a source build whose role is not `fuzz`, a diagnostic build whose role is not `diagnostic_replay` or whose state is not `completed`, and an original artifact that differs from the observation's original artifact. Add update/delete prevention triggers for sanitizer-run rows. Logs reference the existing immutable `artifacts` table; do not store unbounded text blobs in SQLite.
+A trusted pre-exec guard runs inside the already constrained service. Before dispatching the harness it verifies:
 
-Each invocation is a distinct immutable attempt with a fresh UID. A retry creates another row and never overwrites or reclassifies an earlier run. Do not add a general finding or vulnerability status to this table.
+- The process is in the unique transient service cgroup under unified cgroup v2.
+- Actual memory.max is finite and no greater than 1 GiB; memory.swap.max is exactly zero; cpu.max and pids.max reflect the approved bounds.
+- The manager's effective memory limit is finite and no greater than 1 GiB, including ancestor limits. Record configured and effective properties and relevant ancestor values.
+- The workload UID cannot write cgroup.procs in any ancestor above the service subtree. Use safe permission checks against the actual files and effective credentials. If it could migrate itself to an unbounded sibling/ancestor, refuse. If permissions cannot be established, refuse.
+- The service is not delegated to the target and the target receives no writable cgroup subtree.
+- RLIMIT_AS inherited by the guard is unlimited. Do not set RLIMIT_AS.
+- A close-on-exec error pipe or equivalent handshake distinguishes guard refusal, harness exec failure and successful harness exec. Do not record execution as started until exec succeeds.
 
-Update `engine/evidence/migrations.py` with the exact SHA-256 of migration 002 and contiguous version metadata. Preserve the existing checksum for migration 001. The existing migration system must create and verify its pre-migration backup before applying migration 002.
+Do not rely on ProtectControlGroups=yes: systemd 257 documents that this property is unsupported for services in per-user manager instances. The design uses explicit ancestor-permission checks instead. If the check cannot prove that the workload cannot migrate outside the bounded service subtree, the gate fails.
 
-## 9. Artifact publication and transaction ordering
+The workload runs as the ordinary unprivileged user, never root. This cgroup is not a security boundary against deliberately hostile same-UID code, intentional service-manager abuse or an exploit designed to escape. Such work requires a separate isolated-VM design.
 
-1. Validate the database observation, campaign, both builds, source identities, input artifact, paths and resource gates before launching the target.
-2. Execute the one fixed process and capture bounded stdout/stderr files.
-3. Publish stdout and stderr through `EvidenceStore` as content-addressed artifacts. Empty streams are valid artifacts. Verify their returned size and SHA-256.
-4. Recheck build metadata, executable identity, source input digest and output snapshots before database commit.
-5. In one SQLite `BEGIN IMMEDIATE` transaction, register/reuse the diagnostic build, register/reuse both log artifacts, and insert the immutable `sanitizer_runs` row.
-6. If artifact publication succeeds but the database transaction fails, leave the content-addressed objects intact as detectable orphans. Retry is a new attempt; do not delete or rewrite any published object.
-7. Close the database and clean the private temporary input, output staging files and delegated cgroup in all paths. Cleanup failure must be surfaced and recorded without deleting evidence.
+If systemd, required controllers, a requested property, property readback, pre-exec validation, ancestor-permission checks or whole-subtree cleanup is unavailable, record a blocked_preflight attempt and do not dispatch the harness. Do not substitute RSS polling, RLIMIT_AS or unbounded execution.
 
-The original AFL testcase, P3-02 observation, campaign metadata, fuzz build and prior sanitizer runs are never updated or deleted.
+### Harness process and output
 
-## 10. Expected modules and files
+The guard execs only the verified harness with the materialized testcase as its single argument. Use argv and execve, not a shell. Construct a fresh allowlisted environment:
 
-Expected focused changes (subject to design review):
+- ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1.
+- UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1.
+- Minimal fixed PATH and LC_ALL=C.
+- If a verified symbolizer is available, record its path and digest. Otherwise set symbolize=0 and disable automatic symbolizer discovery.
 
-- `engine/build/diagnostic.py`: fixed diagnostic build plan and strict output verification.
-- `engine/build/runner.py`: only the minimal shared runner integration required for the separate diagnostic role; do not weaken AFL build verification.
-- `engine/evidence/sql/002_sanitizer_runs.sql`: additive table, constraints, foreign keys and immutability triggers.
-- `engine/evidence/migrations.py`: register checksum-pinned migration 002.
-- `engine/evidence/repository.py`: typed immutable insertion/query helpers for sanitizer-run rows.
-- `engine/evidence/sanitizer.py`: strict observation/build validation, one-shot execution, output classification and evidence publication.
-- `scripts/build_libpng_diagnostic.py` and `scripts/collect_sanitizer_evidence.py`: fixed operator entry points.
-- `tests/test_diagnostic_build.py`, `tests/test_sanitizer_evidence.py`, and migration/repository tests as needed.
-- `docs/tasks/P3_03_SANITIZER_EVIDENCE_DESIGN.md`: this decision record, updated after review and implementation.
+Do not inherit LD_PRELOAD, AFL variables, Python/user environment, D-Bus/session values or secret-bearing environment values. Use stdin=DEVNULL, a fixed private working directory and closed unrelated file descriptors. Do not inherit a finite RLIMIT_AS. Disable core dumps through the service policy.
 
-Do not refactor the AFL campaign runner, generic process layer, P3-02 importer or existing migration 001 unless the review identifies a specific necessary correction.
+Capture stdout and stderr separately. Retain at most 8 MiB per stream. Continue draining after the retention cap and discard excess bytes so the child cannot block on a full pipe. Preserve retained bytes exactly; do not decode before hashing. Record read completion independently from truncation. Reader shutdown/join must be bounded and verified.
 
-## 11. Acceptance checks
+### Descendant cleanup
 
-### Diagnostic build
+Process-group TERM/KILL is secondary only. Use systemd KillMode=control-group to stop all processes in the service cgroup, including descendants that create new sessions/process groups. On normal exit, timeout or handled interruption:
 
-- Clean build uses the pinned libpng archive/source identity and exact repository harness.
-- All 17 libpng translation units and the harness are verified as ASan+UBSan instrumented.
-- Final harness link includes the corresponding ASan+UBSan runtimes.
-- Build role/profile, compiler, flags, zlib limitation, commands, environment, timestamps and artifact hashes are recorded in schema-v2 build metadata.
-- AFL instrumentation and UBSan trap mode are absent from this diagnostic profile.
-- A second build attempt refuses to overwrite the existing build directory.
+1. Stop the unique transient unit if needed.
+2. Allow the configured TERM interval, then require KILL for remaining unit processes.
+3. Wait for cgroup.events to report populated=0.
+4. Verify no descendant remains in the service subtree.
+5. Collect final unit result and resource counters before removing only the attempt-owned unit.
+6. Never stop or modify unrelated services, parent cgroups or the user manager.
 
-### Collection and evidence
+If cleanup or populated=0 verification fails, record cleanup_status=failed, retain the manifest and report the exact unit name. Do not claim cleanup succeeded.
 
-- Only an existing P3-02 observation UID can be selected.
-- Original artifact bytes are re-hashed before execution; source campaign and database evidence remain unchanged.
-- Only the verified diagnostic harness is executed; no shell, arbitrary command or inherited user environment is accepted.
-- Cgroup-v2 memory gate, wall timeout, CPU limit, output caps and process-group cleanup are enforced.
-- Exit code, signal, timeout/interruption, stdout/stderr truncation, recognized report family and assessment are recorded without conflating them.
-- Stdout/stderr are stored as verified immutable content-addressed artifacts.
-- A sanitizer run links to the same observation, source fuzz build, target/version and campaign, plus a completed diagnostic build for that target/version.
-- Repeated runs create separate immutable records. Database failure leaves no partial relational rows; already published log objects remain detectable as orphans.
-- Missing observations, invalid build provenance, changed artifacts, symlinks, special files, oversized input/output, absent cgroup delegation, timeout, interruption and malformed output paths fail safely.
+## 8. Sanitizer marker interpretation
 
-### Regression and migrations
+Preserve raw bytes from stdout and stderr. Recognize only these byte markers:
 
-- Migration 001 checksum and applied history remain unchanged.
-- Migration 002 is checksum-pinned, transactional, backed up, and tested on an existing P3-01/P3-02 database.
-- Foreign-key, role, immutability and contradictory process-state constraints are tested.
-- Existing P3-01 and P3-02 tests remain green on Python 3.11 and 3.14.
-- A real diagnostic build and one real imported-observation run are performed only when the required pinned source/build material, an imported observation and the cgroup memory gate are available. Otherwise the blocked condition is recorded; mocks are not presented as real sanitizer evidence.
+- ASan: ERROR: AddressSanitizer:
+- LSan: ERROR: LeakSanitizer:
+- UBSan: runtime error:
 
-## 12. Review questions and risk focus
+A bare runtime error: string may be arbitrary target output; call it an observed marker, not an authenticated UBSan report. Raw logs remain authoritative.
 
-The independent read-only reviewer should focus especially on:
+Scan the complete retained byte prefixes, not individual read chunks, so markers split across reads are detected. A marker that crosses the retention boundary and is not wholly retained is not counted; truncation prevents a no-signature result.
 
-1. Whether the one-observation diagnostic execution is correctly separated from P3-04's general replay engine.
-2. Whether the additive relational design has sound composite foreign keys, role checks, immutability and retry behavior.
-3. Whether the build verifier proves every libpng unit and the harness are actually ASan+UBSan-instrumented and does not reuse AFL build products.
-4. Whether the cgroup-v2 gate is technically enforceable in unprivileged WSL 2 and whether its refusal behavior is safe and practical.
-5. Whether output signature classification avoids treating arbitrary stderr, exit codes or signals as confirmed sanitizer findings.
-6. Whether log limits, process termination, artifact publication, migration backup and orphan recovery are sufficient.
-7. Any required blockers separately from optional improvements.
+Classification precedence:
 
-Return one verdict: **APPROVED FOR IMPLEMENTATION**, **APPROVED WITH LIMITATIONS**, or **CHANGES REQUIRED**. Cite exact files/lines and verified assumptions. Do not edit code, tests, configuration or documentation; do not create/switch branches, commit, push, merge, open or update pull requests, change repository settings, or access secrets. Review access must remain read-only.
+- **report_signature_observed:** harness exec succeeded and at least one marker is present in retained stdout/stderr. This remains candidate evidence if execution later times out, is interrupted, terminates by signal or output is truncated.
+- **no_signature_observed:** harness exec succeeded; service completed normally with exit code 0; both streams have complete capture; neither is truncated; both streams were successfully published; and no marker is present.
+- **inconclusive:** every other combination, including blocked preflight, launch failure, timeout/interruption without a marker, signal/non-zero exit without a marker, capture failure, publication failure or truncation without a marker.
 
-## 13. References
+Do not classify systemd/guard diagnostics as harness output. A failed stream read never permits no_signature_observed.
 
-- Project workflow and mandatory gates: `docs/WORKFLOW_DECISIONS.md`, Sections 8, 9 and 11.
-- Phase 3 roadmap: `docs/DEVELOPMENT_PLAN.md`.
-- Prior diagnostic build/replay record: `docs/tasks/LIBPNG_AFL_BUILD_VERIFICATION.md`.
-- P3-02 observation and provenance contract: `docs/tasks/P3_02_AFL_EVIDENCE_INGESTION_DESIGN.md`.
-- Clang 21.1.0 AddressSanitizer build, runtime and report-symbolization guidance: https://releases.llvm.org/21.1.0/tools/clang/docs/AddressSanitizer.html
-- Clang 21.1.0 UndefinedBehaviorSanitizer flags and runtime-report behavior: https://releases.llvm.org/21.1.0/tools/clang/docs/UndefinedBehaviorSanitizer.html
-- AFL++ ASan memory/address-space caveats and corpus-replay guidance: https://aflplus.plus/docs/notes_for_asan/
+Store family names as a sorted unique canonical JSON array from address, leak and undefined_behavior. Families are output markers, not confirmed vulnerabilities.
+
+## 9. Additive database migration
+
+Add checksum-pinned migration 002_sanitizer_runs.sql. Do not modify migration 001 or rewrite existing rows.
+
+Add an immutable STRICT table sanitizer_runs with non-null identity fields and explicit ON DELETE RESTRICT foreign keys. Use composite FKs to prove the observation belongs to the recorded source build, target/version and campaign, and the diagnostic build belongs to the same target/version. An insert trigger rejects source roles other than fuzz, diagnostic roles other than diagnostic_replay, diagnostic builds not completed, and an original artifact different from the observation's artifact.
+
+Each attempt has a canonical lowercase UUIDv4 run_uid. Do not make observation/build pairs unique: a retry is a new fact.
+
+Record:
+- Target, version, source build, campaign, observation, diagnostic build and original artifact IDs.
+- Versioned execution-policy identifier, non-empty argv JSON, fixed environment JSON, resource-policy JSON and runtime-observation JSON.
+- Attempt start/finish timestamps for every final row; nullable execution start/finish timestamps, null when harness exec never succeeded.
+- execution_status: blocked_preflight, launch_failed, exited, signaled, timed_out or interrupted.
+- Nullable exit code and signal with cross-field checks. For exited, require successful exec, execution timestamps, exit code 0..255 and no signal. For signaled, require successful exec, timestamps, valid signal and no exit code. Timed_out/interrupted require successful exec and timestamps; final exit or signal may be present or unknown but not both. blocked_preflight/launch_failed require no successful exec, execution timestamps, exit code or signal.
+- Sanitizer family JSON and assessment; record/attempt/execution timestamps in normalized UTC form and enforce ordering.
+- cleanup_status complete/failed/not_required and bounded detail.
+- Actual kernel, WSL and systemd versions where available, requested/effective cgroup controls, unit/cgroup identity, memory/CPU counters and memory/swap event counters where supported.
+
+For each stream independently, record nullable artifact FK, capture_state (not_started, complete, read_failed), truncated boolean and publication_state (not_started, published, pending_recovery).
+
+Stream invariants:
+- A completed empty stream is a valid zero-byte artifact and must be published.
+- A truncated stream can still be capture_state=complete if EOF was reached after retaining the cap.
+- A read error is read_failed even if a prefix was captured and published.
+- published requires a non-null artifact FK; not_started requires no artifact and truncated=false; pending_recovery requires no artifact FK and an existing retained stage file plus manifest entry.
+- If one publication succeeds and the other fails, preserve the published artifact and the only unpublished staging copy.
+- Enforce the 8 MiB per-artifact ceiling in application code and a database trigger, despite the larger general store limit.
+- stdout and stderr may reference the same artifact, including the same empty artifact.
+
+Validate JSON type/shape using SQLite JSON functions; validate family allowlist/sorted uniqueness and all booleans as 0/1. Use a truth table across status, timestamps, exit/signal, stream states, truncation, publication, families and assessment.
+
+Assessment constraints:
+- A non-empty family array requires report_signature_observed.
+- no_signature_observed is allowed only for exited with code 0, successful complete captures, no truncation, both artifacts published and an empty family array.
+- All other combinations require inconclusive.
+
+Add attempt-history and diagnostic-build indexes. Add update/delete prevention triggers. Preserve existing P3-01 immutability rules.
+
+Update migrations.py with migration 002's exact checksum and contiguous version. Keep migration 001's checksum and history unchanged. Reuse the existing backup, transaction and foreign-key verification path. A failed backup/checksum/foreign-key validation blocks the migration.
+
+## 10. Failure recording, publication and recovery ordering
+
+The fsynced recovery manifest is the fallback record when publication or the database commit cannot complete. It does not replace the final immutable DB row when that row is possible.
+
+1. Validate all evidence identities, completed builds, source hashes, input artifact, store health, paths and recovery capacity.
+2. Create a fresh run UID, attempt directory, manifest and bounded private staging files; fsync the manifest before service launch.
+3. If resource preflight fails, do not dispatch the harness. Record blocked_preflight, inconclusive, null execution times, not_started stream states and no stream artifacts, plus the exact refusal reason and observed resource state.
+4. If the service or guard cannot exec the harness, record launch_failed. Do not classify launcher/guard diagnostics as sanitizer output.
+5. Once exec succeeds, record execution start, run once, capture both streams and record complete/read_failed and truncated independently.
+6. Stop and verify the whole service subtree, collect resource observations and determine cleanup status before final immutable insertion.
+7. Publish each successfully captured stream independently through EvidenceStore. Verify size and SHA-256. Publish complete empty streams as zero-byte artifacts.
+8. If publication fails, retain the capped private stage file and manifest, set pending_recovery and surface the exact path. Never delete the only unpublished copy.
+9. Remove input and stage files only when no longer the only copy. Record cleanup failure before insertion; retain the recovery manifest if any cleanup or publication is incomplete.
+10. Recheck diagnostic build metadata, executable and original-input digest.
+11. In one BEGIN IMMEDIATE transaction, register/reuse successfully published stream artifacts and insert the immutable run row. The diagnostic build is already registered.
+12. If DB commit fails, retain the manifest and unpublished stage files. Published CAS objects remain intact and are discoverable as unreferenced objects by existing store verification. Report run UID and recovery path.
+13. After successful row commit and complete cleanup, remove the recovery manifest and attempt directory. If a crash leaves a manifest, reconcile it against run_uid in the DB before any cleanup.
+
+Handled SIGINT/SIGTERM stops the service, drains what remains, records interrupted and inserts a row when the database is available. SIGKILL, kernel failure or power loss cannot guarantee a final row. The guarantee is best-effort recovery from the last fsynced manifest/stage files if the filesystem survives. Never claim every interruption creates a completed DB row.
+
+The original testcase, P3-02 observation, campaign metadata, fuzz build and prior sanitizer rows are never modified or deleted. Every retry gets a fresh UID.
+
+## 11. Focused implementation files
+
+Expected files, subject to final approved scope:
+
+- engine/build/diagnostic.py for the fixed build plan and effective-command verification.
+- Minimal integration in engine/build/runner.py without weakening AFL verification.
+- engine/evidence/sql/002_sanitizer_runs.sql and checksum registration in engine/evidence/migrations.py.
+- Typed sanitizer-run and diagnostic-build lookup methods in engine/evidence/repository.py.
+- engine/evidence/sanitizer.py for evidence validation, attempt recovery, service orchestration, classification and publication.
+- engine/evidence/sanitizer_exec_guard.py for pre-exec resource checks and harness-exec handshake.
+- scripts/build_libpng_diagnostic.py and scripts/collect_sanitizer_evidence.py.
+- Focused build, evidence, migration, repository and recovery tests.
+- This design record.
+
+Do not refactor the AFL campaign runner, P3-02 importer, generic process layer or migration 001 absent a specific approved reason.
+
+## 12. Acceptance checks and real WSL gate
+
+### Build and instrumentation
+
+- The authenticated pinned source and exact repository harness are used.
+- Clang 21.1.8 and its runtime/package identity match the approved policy.
+- Exactly 17 expected libpng source files appear once, with unique object outputs.
+- Tokenized compile/link verification rejects wrappers, response files, plugins, conflicting later flags, sanitizer-disable/trap/minimal-runtime/ignorelist options and alternate archives.
+- Every expected unit and the harness have effective ASan+UBSan compile settings; the final link uses the exact newly built archive and approved Clang runtime.
+- Archive member/object/source mapping, symbols and disposable ASan/UBSan runtime probes are checked.
+- Build metadata is registered as completed before collection. AFL instrumentation and UBSan trap mode are absent.
+- A second build attempt refuses to overwrite the existing directory.
+
+### Real resource-boundary test
+
+Mocks do not satisfy this gate. On the actual supported WSL 2 environment, use only harmless test executables before any real imported observation. Verify:
+
+- Actual WSL version/configuration, kernel, systemd version and user-manager reachability.
+- A transient .service starts with Type=exec, not a scope.
+- All requested memory, swap, CPU, runtime, task and kill properties are accepted.
+- From inside the service, the guard reads effective memory.max <=1 GiB, memory.swap.max=0, cpu.max, pids.max and relevant ancestor controls before test exec.
+- The workload UID cannot write cgroup.procs in ancestors above the service subtree. If this cannot be established, production collection remains blocked.
+- A harmless process forks a child and a setsid child; service shutdown/timeout kills every descendant and cgroup.events reaches populated=0.
+- Normal exit, timeout and handled interruption clean up only the attempt-owned unit. Parent cgroups and unrelated services remain unchanged.
+- Missing/invalid resource properties or permission boundaries fail closed before test exec.
+- The test records configured/effective properties, cgroup readings, memory/swap events and cleanup result.
+
+If WSL lacks any property or permission boundary, record the blocked result. Do not enable controllers manually, alter parent/system cgroups, run the target as root or replace the gate with a weaker approximation.
+
+### Collection, recovery and database tests
+
+- Only existing P3-02 observation UIDs and registered completed diagnostic builds are accepted.
+- Every source/build/artifact identity mismatch and direct SQL constraint violation is rejected.
+- Original bytes are re-hashed; original campaign and database evidence remain unchanged.
+- No shell, arbitrary command or inherited user environment is accepted.
+- Empty logs, exact 8 MiB and cap-plus-one output, malformed bytes, split markers and retention-boundary markers are tested.
+- Capture read failure, truncation and publication failure are separate states.
+- Blocked preflight and launch failure do not claim harness execution or create fake stream artifacts.
+- Test partial publication, retained recovery files, cleanup failure, DB commit failure and manifest reconciliation.
+- Test marker precedence with timeout, signal, interruption and truncation; no-signature requires clean exit and fully captured, published streams.
+- Handled interruption is tested. SIGKILL/power-loss is documented as best-effort staging recovery only.
+- Retries get fresh UIDs and never alter prior rows.
+- Migration 001 checksum/history remain unchanged. Migration 002 backup, checksum, transaction, FK enforcement and rollback are tested against an existing P3-01/P3-02 database.
+- Existing P3-01/P3-02 suites remain green on Python 3.11 and 3.14.
+- Mocked orchestration tests remain separate from the real WSL integration gate. No unavailable environment or missing observation is reported as successful real evidence.
+
+## 13. References and approval gate
+
+Project references:
+- docs/WORKFLOW_DECISIONS.md, including WSL risk limits and mandatory review gates.
+- docs/DEVELOPMENT_PLAN.md.
+- docs/tasks/LIBPNG_AFL_BUILD_VERIFICATION.md.
+- docs/tasks/P3_02_AFL_EVIDENCE_INGESTION_DESIGN.md.
+- Original design review baseline commit 48ea0ab19467844a997152566e2c8ecca591d067.
+
+Technical references:
+- Linux 6.6 cgroup v2: https://www.kernel.org/doc/html/v6.6/admin-guide/cgroup-v2.html
+- systemd 257 systemd-run: https://www.freedesktop.org/software/systemd/man/257/systemd-run.html
+- systemd 257 resource control: https://www.freedesktop.org/software/systemd/man/257/systemd.resource-control.html
+- systemd 257 execution environment: https://www.freedesktop.org/software/systemd/man/257/systemd.exec.html
+- systemd 257 process killing: https://www.freedesktop.org/software/systemd/man/257/systemd.kill.html
+- Microsoft WSL systemd support: https://learn.microsoft.com/en-us/windows/wsl/systemd
+- Clang AddressSanitizer documentation for LLVM 21: https://releases.llvm.org/21.1.0/tools/clang/docs/AddressSanitizer.html
+- Clang UndefinedBehaviorSanitizer documentation for LLVM 21: https://releases.llvm.org/21.1.0/tools/clang/docs/UndefinedBehaviorSanitizer.html
+- AFL++ sanitizer notes: https://aflplus.plus/docs/notes_for_asan/
+
+This revision proposes a concrete conditional launch contract, stricter instrumentation verification and explicit failure/recovery semantics. It does **not** prove the current WSL 2 environment satisfies the gate. Do not implement until the project owner approves this revised design. Do not claim the resource boundary is available until the real WSL integration gate passes. If it cannot pass without weakening the requirements, stop and propose a separately scoped alternative rather than implementing an unbounded fallback.
