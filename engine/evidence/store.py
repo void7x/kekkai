@@ -555,60 +555,95 @@ class EvidenceStore:
                 os.close(first_fd)
 
     def verify_evidence_store(self, connection) -> StoreVerification:
-        """Compare registered artifact rows with the immutable objects directory."""
-        rows = connection.execute("SELECT sha256, size_bytes FROM artifacts ORDER BY sha256").fetchall()
-        expected = {row[0]: row[1] for row in rows}
-        missing: list[str] = []
-        corrupt: list[str] = []
-        verified = 0
-        for digest, size in expected.items():
-            try:
-                first_fd, second_fd = self._open_shard(digest, create=False)
+        """Compare registered artifact rows with immutable objects under the store lock."""
+        with self._exclusive_lock():
+            rows = connection.execute(
+                "SELECT sha256, size_bytes FROM artifacts ORDER BY sha256"
+            ).fetchall()
+            expected = {row[0]: row[1] for row in rows}
+            missing: list[str] = []
+            corrupt: list[str] = []
+            verified = 0
+            for digest, size in expected.items():
                 try:
-                    self._verify_object(second_fd, digest, size)
-                finally:
-                    os.close(second_fd)
-                    os.close(first_fd)
-                verified += 1
-            except FileNotFoundError:
-                missing.append(digest)
-            except (OSError, EvidenceIntegrityError, ValueError):
-                corrupt.append(digest)
-
-        unreferenced: list[str] = []
-        for first in os.listdir(self.objects_sha256_fd):
-            first_info = os.stat(first, dir_fd=self.objects_sha256_fd, follow_symlinks=False)
-            if not stat.S_ISDIR(first_info.st_mode) or len(first) != 2:
-                corrupt.append(first)
-                continue
-            first_fd = os.open(first, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=self.objects_sha256_fd)
-            try:
-                for second in os.listdir(first_fd):
-                    second_info = os.stat(second, dir_fd=first_fd, follow_symlinks=False)
-                    if not stat.S_ISDIR(second_info.st_mode) or len(second) != 2:
-                        corrupt.append(f"{first}/{second}")
-                        continue
-                    second_fd = os.open(second, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=first_fd)
+                    first_fd, second_fd = self._open_shard(digest, create=False)
                     try:
-                        for filename in os.listdir(second_fd):
-                            digest = filename[:-4] if filename.endswith(".bin") else ""
-                            if digest not in expected:
-                                unreferenced.append(f"{first}/{second}/{filename}")
+                        self._verify_object(second_fd, digest, size)
                     finally:
                         os.close(second_fd)
-            finally:
-                os.close(first_fd)
-        stale = tuple(
-            name for name in os.listdir(self.staging_fd)
-            if name.startswith(".ingest-") and name.endswith(".tmp")
-        )
-        return StoreVerification(
-            verified_count=verified,
-            missing=tuple(missing),
-            corrupt=tuple(corrupt),
-            unreferenced=tuple(unreferenced),
-            stale_staging=stale,
-        )
+                        os.close(first_fd)
+                    verified += 1
+                except FileNotFoundError:
+                    missing.append(digest)
+                except (OSError, EvidenceIntegrityError, ValueError):
+                    corrupt.append(digest)
+
+            def valid_shard(name: str, info: os.stat_result) -> bool:
+                return (
+                    len(name) == 2
+                    and all(char in "0123456789abcdef" for char in name)
+                    and stat.S_ISDIR(info.st_mode)
+                    and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o700
+                    and info.st_dev == self._expected_dev
+                )
+
+            unreferenced: list[str] = []
+            for first in sorted(os.listdir(self.objects_sha256_fd)):
+                first_info = os.stat(
+                    first, dir_fd=self.objects_sha256_fd, follow_symlinks=False
+                )
+                if not valid_shard(first, first_info):
+                    corrupt.append(first)
+                    continue
+                try:
+                    first_fd = os.open(
+                        first,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=self.objects_sha256_fd,
+                    )
+                except OSError:
+                    corrupt.append(first)
+                    continue
+                try:
+                    for second in sorted(os.listdir(first_fd)):
+                        second_info = os.stat(
+                            second, dir_fd=first_fd, follow_symlinks=False
+                        )
+                        if not valid_shard(second, second_info):
+                            corrupt.append(f"{first}/{second}")
+                            continue
+                        try:
+                            second_fd = os.open(
+                                second,
+                                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                | getattr(os, "O_NOFOLLOW", 0),
+                                dir_fd=first_fd,
+                            )
+                        except OSError:
+                            corrupt.append(f"{first}/{second}")
+                            continue
+                        try:
+                            for filename in sorted(os.listdir(second_fd)):
+                                digest = filename[:-4] if filename.endswith(".bin") else ""
+                                if digest not in expected:
+                                    unreferenced.append(
+                                        f"{first}/{second}/{filename}"
+                                    )
+                        finally:
+                            os.close(second_fd)
+                finally:
+                    os.close(first_fd)
+
+            stale = tuple(sorted(os.listdir(self.staging_fd)))
+            return StoreVerification(
+                verified_count=verified,
+                missing=tuple(missing),
+                corrupt=tuple(corrupt),
+                unreferenced=tuple(unreferenced),
+                stale_staging=stale,
+            )
 
     def close(self) -> None:
         """Close all retained directory descriptors."""
