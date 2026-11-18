@@ -17,7 +17,9 @@ following before campaign output is created:
 
 If the volume is absent or any identity check fails, campaign execution stops
 before a clean build or campaign directory is created. The image is never
-formatted by the mount helper.
+formatted by the mount helper. The image must have private mode `0600`.
+For an existing image with broader permissions, verify that it is the expected
+user-owned image and run `chmod 600 ~/kekkai-work/campaign-quota.ext4` once.
 
 After WSL restarts, mount the existing image with:
 
