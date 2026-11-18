@@ -1,6 +1,6 @@
 # P3-03 Design: Bounded ASan/UBSan Evidence Collection
 
-**Status:** Review-corrected draft. Pending project-owner design approval and a real WSL 2 resource-boundary acceptance check. This document does not authorize implementation.  
+**Status:** Owner-approved for implementation. WSL 2 feasibility probes passed for memory, swap, task limits, read-only cgroup controls and descendant cleanup. CPU quota readback remains a pre-execution implementation check.  
 **Base:** development at 64db5c3050fd68ac601dd189b89b1c6e3f574e0e  
 **Feature branch:** feature/p3-03-sanitizer-evidence  
 **Original reviewed draft:** 48ea0ab19467844a997152566e2c8ecca591d067  
@@ -17,7 +17,7 @@ A successful attempt links the exact diagnostic build, selected observation and 
 
 The original review identified three blockers. This revision makes these design decisions:
 
-- **B01, bounded execution:** Use only a transient per-user systemd service, not a transient scope and not post-launch PID migration. The systemd manager must create the service cgroup and apply resource properties before executing a trusted pre-exec guard. The guard verifies the active limits and migration permissions before dispatching the harness. Any failed or unprovable check blocks execution.
+- **B01, bounded execution:** Use only a transient system-managed systemd service with `DynamicUser=yes`, not a per-user service, scope or post-launch PID migration. The system manager creates the service cgroup and applies resource properties before executing the trusted pre-exec guard. The target receives an ephemeral unprivileged UID, no capabilities, `NoNewPrivileges=yes`, and a read-only cgroup view through `ProtectControlGroups=strict`. Any failed or unprovable check blocks execution. `sudo` is used only to ask the system manager to create/inspect/stop the service; the guard and target never run as root.
 - **B02, effective instrumentation:** Approve Clang 21.1.8, matching the existing recorded Phase 2 diagnostic build. Verify the exact 17-source set, tokenized compile/link commands, absence of sanitizer overrides, exact archive membership, runtime identity and executable sanitizer behavior. Flag presence alone is insufficient.
 - **B03, attempt recovery:** Register a fully verified diagnostic build as completed before collection. Create a durable per-attempt recovery manifest before execution. Distinguish preflight blocks from harness executions, and record capture completeness separately from retention truncation and artifact publication. Preserve unpublished stream data. Complete recordable workload cleanup before inserting the immutable final row.
 
@@ -51,7 +51,7 @@ The systemd approach is conditional, not assumed to work on WSL 2. WSL support f
 - UI, networking, AI, CASR, symbolication pipeline or new runtime dependencies.
 - Defending the host against an intentional same-UID escape or a successful arbitrary-code-execution exploit in the target.
 
-**Threat model limitation:** WSL 2 is not a security boundary. This design treats the fixed local harness and target as non-hostile programs that may crash, hang, fork accidentally or consume resources, but are not deliberately trying to attack the user manager or escape as the same UID. The cgroup is a resource-control boundary, not a hostile-code sandbox. Risky samples or deliberate escape testing require a separately approved isolated VM design. This is consistent with the project's workflow decisions.
+**Threat model limitation:** WSL 2 is not a security boundary. The fixed local harness and target may crash, hang, fork accidentally or consume resources, but are not treated as deliberately hostile code attempting a kernel/system-manager exploit. The target runs under a systemd `DynamicUser` identity, with no capabilities and a read-only cgroup view. The cgroup is a resource-control boundary, not a hostile-code sandbox. Risky samples or deliberate escape testing require a separately approved isolated VM design. This is consistent with the project's workflow decisions.
 
 P3-03 supplies one narrow diagnostic execution primitive. P3-04 remains responsible for the broader reproduction/replay engine.
 
@@ -134,39 +134,53 @@ Before starting the service:
 
 Materialize only the selected original artifact into the private attempt directory. Create input/output files exclusively with mode 0600 and no-follow semantics. Re-hash the input immediately before execution. Never modify the original campaign testcase or evidence-store object.
 
-### Sole launch mechanism: transient systemd user service
+### Sole launch mechanism: transient systemd system service
 
-P3-03 v1 uses systemd-run --user to create a unique transient **.service** unit. It must not use --scope, which runs the command in the caller, and must not start the harness with Popen and then migrate its PID. The manager must create the service cgroup and apply controls before executing the command.
+P3-03 v1 uses `sudo systemd-run --system` to create a unique transient **.service** unit. It must not use `--user`, `--scope`, or start the harness with Popen and then migrate its PID. The privileged system manager creates the service cgroup and applies controls before executing the trusted guard.
 
-Prerequisites include unified cgroup v2, a reachable user systemd manager, and available memory, swap, CPU and pids controllers with the necessary user-service properties. The implementation verifies actual systemd version and property support. WSL systemd availability alone is not enough. No root, sudo, parent/system cgroup modification, manual controller enabling or unbounded fallback is allowed.
+The caller must have permission to use sudo for the system manager. The implementation must use non-interactive sudo after an explicit authorization step (for example, the operator runs `sudo -v`); if authorization is unavailable, it refuses before creating a unit. The Python collector, guard and target are never executed as root. No parent/system cgroup is manually modified, no controller is manually enabled, and no unrelated service is changed.
 
-Use service Type=exec and systemd-run --pipe --wait. The fixed policy requests:
+The successful WSL feasibility probe on 2026-11-18 used:
+- `DynamicUser=yes`, `NoNewPrivileges=yes`, an empty `CapabilityBoundingSet`, and `ProtectControlGroups=strict`.
+- `MemoryMax=1G`, `MemorySwapMax=0`, and `TasksMax=64`.
+- The workload observed `memory.max=1073741824`, `memory.swap.max=0`, and `pids.max=64`.
+- `/sys/fs/cgroup` was mounted read-only; attempts to write `cgroup.procs` failed with `EROFS`.
+- A child created a separate session and ignored SIGTERM. Stopping the service removed the child and the temporary runtime directory.
+- The service ran under a dynamic UID (63295 in the observed run), with zero effective capabilities and `NoNewPrivs=1`.
 
-- MemoryMax=1G and MemoryAccounting=yes.
-- MemorySwapMax=0.
-- CPUQuota=60% and CPUQuotaPeriodSec=100ms.
-- RuntimeMaxSec=5s.
-- TasksMax=32.
-- KillMode=control-group, TimeoutStopSec=1s and SendSIGKILL=yes.
-- LimitCORE=0 and Delegate=no.
+The above confirms this mechanism on the tested WSL instance. The implementation must still check every requested property, including CPU quota, read its effective value inside the guard, and fail closed when any requested property is unavailable.
 
-CPUQuota=60% limits the service to roughly 60% of one CPU. Together with the five-second service runtime ceiling, this is approximately three CPU-seconds, subject to kernel quota-period accounting. It is a cgroup-wide rate limit, not a per-process RLIMIT_CPU guarantee. Memory and swap are separate limits and both must be read back.
+Use service Type=exec and `systemd-run --system --pipe --wait --collect`. The fixed policy requests:
+
+- `DynamicUser=yes`.
+- `ProtectControlGroups=strict`, `NoNewPrivileges=yes`, empty `CapabilityBoundingSet=`, and `Delegate=no`.
+- `MemoryMax=1G` and `MemoryAccounting=yes`.
+- `MemorySwapMax=0`.
+- `CPUQuota=60%` and `CPUQuotaPeriodSec=100ms`.
+- `RuntimeMaxSec=5s`.
+- `TasksMax=32`.
+- `KillMode=control-group`, `TimeoutStopSec=1s`, and `SendSIGKILL=yes`.
+- `LimitCORE=0`.
+
+CPUQuota=60% limits the service to roughly 60% of one CPU. Together with the five-second service runtime ceiling, this is approximately three CPU-seconds, subject to kernel quota-period accounting. It is a cgroup-wide rate limit, not a per-process RLIMIT_CPU guarantee. Memory and swap are separate controls and both must be read back.
+
+Use `LoadCredential=` for the original testcase and trusted guard script, and bind-mount the verified harness binary read-only into a service-owned runtime directory. Do not make the recovery directory or original testcase world-readable. Credential sources must be stable regular files owned by the operator; systemd loads them before service execution. The target receives only the input credential path as its single argument. No repository, campaign, evidence database, evidence-store object tree or host home directory is bind-mounted writable into the service.
 
 A trusted pre-exec guard runs inside the already constrained service. Before dispatching the harness it verifies:
 
-- The process is in the unique transient service cgroup under unified cgroup v2.
-- Actual memory.max is finite and no greater than 1 GiB; memory.swap.max is exactly zero; cpu.max and pids.max reflect the approved bounds.
-- The manager's effective memory limit is finite and no greater than 1 GiB, including ancestor limits. Record configured and effective properties and relevant ancestor values.
-- The workload UID cannot write cgroup.procs in any ancestor above the service subtree. Use safe permission checks against the actual files and effective credentials. If it could migrate itself to an unbounded sibling/ancestor, refuse. If permissions cannot be established, refuse.
-- The service is not delegated to the target and the target receives no writable cgroup subtree.
+- `/proc/self/cgroup` is in the service's cgroup namespace; a namespace-relative path of `/` is acceptable and expected with the tested `ProtectControlGroups=strict` setup.
+- The cgroup filesystem is mounted read-only and the visible `cgroup.procs` / `cgroup.threads` controls are not writable by the dynamic workload identity.
+- Actual `memory.max` is finite and no greater than 1 GiB; `memory.swap.max` is exactly zero; `cpu.max` and `pids.max` reflect the approved bounds.
+- The system manager confirms the unit's configured resource properties and that the unit has not been delegated.
+- The workload receives no writable cgroup subtree.
 - RLIMIT_AS inherited by the guard is unlimited. Do not set RLIMIT_AS.
 - A close-on-exec error pipe or equivalent handshake distinguishes guard refusal, harness exec failure and successful harness exec. Do not record execution as started until exec succeeds.
 
-Do not rely on ProtectControlGroups=yes: systemd 257 documents that this property is unsupported for services in per-user manager instances. The design uses explicit ancestor-permission checks instead. If the check cannot prove that the workload cannot migrate outside the bounded service subtree, the gate fails.
+Do not rely on `ProtectControlGroups=yes`; the implementation uses `ProtectControlGroups=strict` on a system service and verifies the read-only cgroup mount inside the process. If the check cannot prove that the workload cannot change its cgroup membership, the gate fails.
 
-The workload runs as the ordinary unprivileged user, never root. This cgroup is not a security boundary against deliberately hostile same-UID code, intentional service-manager abuse or an exploit designed to escape. Such work requires a separate isolated-VM design.
+The workload runs as the dynamically allocated unprivileged UID, never root. This cgroup is not a security boundary against a kernel/system-manager exploit or deliberate hostile code able to attack the host through unrelated interfaces. Such work requires a separate isolated-VM design.
 
-If systemd, required controllers, a requested property, property readback, pre-exec validation, ancestor-permission checks or whole-subtree cleanup is unavailable, record a blocked_preflight attempt and do not dispatch the harness. Do not substitute RSS polling, RLIMIT_AS or unbounded execution.
+If sudo authorization, systemd, required controllers, a requested property, property readback, pre-exec validation, cgroup read-only checks or whole-subtree cleanup is unavailable, record a blocked_preflight attempt and do not dispatch the harness. Do not substitute RSS polling, RLIMIT_AS or unbounded execution.
 
 ### Harness process and output
 
@@ -360,4 +374,4 @@ Technical references:
 - Clang UndefinedBehaviorSanitizer documentation for LLVM 21: https://releases.llvm.org/21.1.0/tools/clang/docs/UndefinedBehaviorSanitizer.html
 - AFL++ sanitizer notes: https://aflplus.plus/docs/notes_for_asan/
 
-This revision proposes a concrete conditional launch contract, stricter instrumentation verification and explicit failure/recovery semantics. It does **not** prove the current WSL 2 environment satisfies the gate. Do not implement until the project owner approves this revised design. Do not claim the resource boundary is available until the real WSL integration gate passes. If it cannot pass without weakening the requirements, stop and propose a separately scoped alternative rather than implementing an unbounded fallback.
+This owner-approved revision records the successful harmless WSL 2 system-service probes and defines the tested system-managed launch model. It does not authorize weakening any failed runtime check. The implementation must still verify CPU quota and all effective limits before executing a target. If any check fails, record blocked_preflight and stop rather than using an unbounded fallback.
