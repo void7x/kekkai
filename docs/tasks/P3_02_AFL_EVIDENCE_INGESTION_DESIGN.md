@@ -33,7 +33,7 @@ Update the campaign runner to emit `campaign.json` schema version 2. Before the 
 - `seed_count`: number of direct regular seed files in that manifest.
 - `build_metadata_sha256`: SHA-256 of the verified `build.json` used by the campaign.
 
-Also record the observed AFL++ version already established by the required preflight/coverage validation, rather than relying solely on the configured expected version.
+Also record a structured `toolchain` object with `compiler_version` and `aflpp_version` from the successful build-provenance result, plus `afl_showmap_version` from the successful coverage result. Do not make the importer parse human-readable report strings. The expected AFL++ version must match the observed `aflpp_version`.
 
 The seed-manifest helper must enforce the existing preflight bounds (maximum 4,096 direct entries and 512 MiB total), reject symlinks and special files, open files without following links, and detect a file changing while it is hashed. It must produce deterministic canonical JSON and a stable digest.
 
@@ -62,7 +62,7 @@ The service must validate the complete campaign before the first write:
 1. **Paths and ownership**
    - Require absolute, existing, user-owned paths with no symlink components.
    - Re-verify the adapter's pinned campaign-storage mount and require the campaign directory to be a direct child of its configured output parent.
-   - Require the campaign directory and relevant AFL output directories to be plain directories on the expected campaign filesystem.
+   - Require the campaign directory, detected single-worker output root, and both `crashes/` and `hangs/` directories to be plain user-owned directories on the expected campaign filesystem. Both `crashes/` and `hangs/` must exist. A failed/interrupted campaign that ended before AFL++ created these directories is refused with a clear no-output validation error before any evidence-store write.
    - Require `campaign.json` to be a regular, user-owned, bounded file opened without following symlinks. Read it stably and reject duplicate JSON keys.
 
 2. **Campaign identity**
@@ -76,18 +76,20 @@ The service must validate the complete campaign before the first write:
    - Re-hash the six recorded build outputs and require them to match `build.json`; verify the pinned source archive/tree identity and harness identity against their recorded hashes and fixed build contract.
    - Do not re-run compiler or AFL++ version probes during historical import. Use the exact campaign-time version facts preserved in the successful provenance report inside `campaign.json`; refuse the import if required facts are absent or malformed.
    - Populate target, target-version and build records only from these verified records. Never infer a missing compiler version or substitute the currently installed version for a campaign-time version.
-   - Populate campaign metadata only from the campaign JSON, its captured identity, the exact command and any validated AFL++ statistics.
+   - The deterministic `builds` mapping for this fixed profile is: `build_role='fuzz'`; `compiler_path='/usr/bin/afl-clang-fast'` from the verified recorded build command; `compiler_version` from the campaign-v2 structured toolchain; `cmake_build_type='RelWithDebInfo'` from the verified CMake cache; `aflpp_version` from the campaign-v2 observed version; `afl_instrumented_locations=NULL` because the schema-v2 adapter build verifier does not record a numeric count; `sanitizer_config_json` equal to canonical JSON `{"afl_debug":"1","afl_use_ubsan":"1","profile":"libpng-afl-ubsan"}`; and `environment_json` equal to canonical JSON of the exact `build.json.environment` object. These values are fixed-profile constants or exact verified facts.
+   - Populate campaign metadata only from the campaign JSON, its captured identity, the exact command and any validated AFL++ statistics. Specifically, `campaign_metadata_sha256` is the SHA-256 of the exact raw final `campaign.json` bytes read during stable validation, and `afl_max_generated_bytes` comes from the validated positive integer immediately following the sole `-G` argument in the recorded command; reject missing, duplicate or mismatched `-G` arguments.
 
 4. **AFL output structure**
    - Support only the current single-worker output layouts: crash/hang directories directly under the recorded AFL output root, or under its single `default/` worker directory. Detect the layout explicitly; refuse ambiguous or additional worker layouts.
    - Scan only direct entries in `crashes/` and `hangs/`. Ignore only AFL++'s `README.txt`, and only when it is a regular, user-owned file. Reject symlinks, directories, special files and unexpected filenames.
-   - Parse the filename identity fields conservatively: `id` is required; `sig` is required for crashes and absent for hangs; `time` and `execs` are optional non-negative decimal integers. Preserve the complete original filename. Unknown filename tokens are retained in the filename but not interpreted.
+   - Parse filename tokens conservatively: the first token must be `id:<decimal>`; duplicate `id`, `sig`, `time` or `execs` keys are rejected; `sig` is required for crashes and must be decimal `1..255`; any `sig` token on a hang is rejected; `time` and `execs` are optional non-negative decimal integers. Preserve the complete original filename. Unknown tokens are retained in the filename but not interpreted. Perform this validation before publishing any artifact.
    - Record the worker identity as `default`. A crash signal maps to `observed_signal`; do not invent an exit code. A hang has no inferred signal or exit code.
    - Derive `source_file_mtime_utc` from the source file's nanosecond filesystem timestamp, normalized to the database's six-digit UTC format.
 
 5. **Resource bounds and stability**
-   - Reuse P3-01's 16 MiB per-artifact ceiling. Set a separate bounded total-import budget and a maximum entry count in the implementation; choose conservative values and test the failure paths.
-   - Use descriptor/no-follow checks and stable before/after file metadata when enumerating and copying. Recheck directory entries after copying so changes during import fail closed.
+   - Reuse P3-01's 16 MiB per-artifact ceiling. Use named constants `MAX_IMPORT_OBSERVATIONS = 4096` and `MAX_IMPORT_TOTAL_BYTES = 512 * 1024 * 1024`, with tests that patch the limits for boundary cases.
+   - During pre-scan, retain each candidate's `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)` and exact entry set for both directories. Use descriptor-relative no-follow checks. After all copies complete and before opening the SQLite write transaction, re-scan both directories and require identical entry sets and snapshots; require each `StoredArtifact.size_bytes` to equal its pre-scan size. Any change aborts; already published copies remain detectable as unreferenced artifacts.
+   - Compute `source_file_mtime_utc` from integer `st_mtime_ns`: `seconds, remainder = divmod(st_mtime_ns, 1_000_000_000)` and `microseconds = remainder // 1_000`, then format the UTC second and six-digit microseconds. Do not convert nanoseconds through floating-point `st_mtime`.
    - Publish original source files through `EvidenceStore.publish_file()`; do not rename, chmod, edit or delete anything in the campaign tree.
 
 ## 6. Metadata mapping
