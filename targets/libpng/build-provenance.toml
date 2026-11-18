@@ -1,0 +1,30 @@
+schema_version = 1
+target_name = "libpng"
+target_version = "1.6.59"
+
+harness_source = "targets/libpng/png_read_harness.c"
+harness_source_sha256 = "3f67a53d149535763e6d76e26edc4147eb31cd2765f838b5317d4065e7fe2bdc"
+
+harness_binary_sha256 = "72678e987fd90f94246ac7537714ed5177114cb337ba1b8ae77e79d1caba0432"
+library_archive = "libpng16.a"
+library_archive_sha256 = "cf1dcd011ae2cda0d014b3b84ca3c9651fe9322372f0952c57c125aea73236b8"
+
+cmake_cache = "CMakeCache.txt"
+compile_database = "compile_commands.json"
+expected_translation_units = 17
+
+compiler_path = "/usr/bin/afl-clang-fast"
+compiler_version = "Ubuntu clang version 21.1.8 (6ubuntu1)"
+cmake_build_type = "RelWithDebInfo"
+position_independent_code = true
+png_static = true
+png_shared = false
+png_tests = false
+png_tools = false
+png_framework = false
+
+aflpp_version = "4.33c"
+afl_instrumented_locations = 1987
+ubsan_mode = "trap"
+
+evidence_document = "docs/tasks/LIBPNG_AFL_BUILD_VERIFICATION.md"

@@ -81,6 +81,113 @@ Acceptance:
 - campaign state and logs are traceable;
 - no arbitrary command execution path is introduced.
 
+### Verified progress — 2026-11-11
+
+Implemented and verified:
+- Strict TOML adapter configuration and path validation.
+- Libpng preflight and existing build-provenance checks.
+- Harness smoke validation: 13/13 cases passed.
+- AFL++ coverage validation: 10/10 distinct seed maps.
+- Adam7 coverage repeatability: passed.
+- Single-worker campaign orchestration, metadata, bounded logs, watchdog, process-group cleanup and lifecycle-state handling.
+- AFL++ generated-input argument capped at the installed build's verified 1 MiB maximum; harness input limit remains 8 MiB.
+- Safe integration check: all four validation gates passed with the actual campaign launch blocked.
+- Automated tests: 100/100 passed.
+
+The first live orchestrator launch failed before fuzzing because the configured AFL++ `-G` value exceeded the installed tool's maximum. The command builder has since been corrected and reverified. A successful 300-second live campaign and 338-input sanitizer replay were completed on 2026-11-11.
+
+**Phase 2 is complete for the libpng 1.6.59 adapter.** The clean build, four validation gates, live campaign and retained-corpus sanitizer replay passed. See the Phase 2 verification report for evidence and limitations.
+
+## Security remediation verification - 2026-11-12 to 2026-11-18
+
+A follow-up security remediation was implemented and pushed to
+`fix/phase2-security-remediation`. The work strengthens the initial libpng
+1.6.59 pilot without expanding Phase 2 into the later roadmap phases.
+
+### Latest recorded verification
+
+- GitHub Actions run [#44254082914](https://github.com/void7x/kekkai/actions/runs/44254082914), on Ubuntu 24.04 with Python 3.11: Python compilation passed and **166 tests passed, 0 failures, 0 errors** (7.155 seconds).
+- Local WSL Ubuntu 26.04.1 verification: Python 3.11.18 compiled successfully and passed 166 tests (5.912 seconds); Python 3.14.4 compiled successfully and passed 166 tests (6.805 seconds).
+- Existing authenticated libpng 1.6.59 build provenance passed: pinned archive and extracted source-tree identity, recorded build steps, six artifact hashes, CMake configuration, compiler, AFL++ and zlib versions all matched.
+- Adapter preflight passed, including source version, harness, seed corpus, dedicated storage mount and AFL++ 4.33c.
+- Campaign storage verification passed: exact ext4 UUID and loop backing image matched; image mode 0600; mounted filesystem root owned by the current user with mode 0700 and required mount options.
+- Harness smoke validation: **13/13 cases passed**.
+- AFL++ coverage validation: **10/10 seed maps passed and were distinct**; Adam7 repeatability passed on both repeated runs (552 tuples and identical map hashes).
+- No new live AFL++ campaign was launched during this remediation.
+
+### Security and reliability remediation
+
+- **Source authenticity and provenance:** The exact libpng archive is
+  SHA-256 pinned. Archive entries and the extracted source tree are checked.
+  Build metadata schema version 2 records source identity and artifact hashes.
+- **Process lifecycle:** Shared process-group handling covers timeout,
+  interruption, descendant cleanup and SIGTERM.
+- **SIGTERM integration:** External SIGTERM integration tests for both build
+  and campaign orchestration passed. They verify descendant cleanup and
+  interrupted final metadata.
+- **Root protection:** Public build and campaign entry points reject root
+  execution.
+- **Filesystem and configuration checks:** Symlink and unsafe-path checks,
+  controlled subprocess environments and bounded tool-version probes are
+  implemented.
+- **Artifact limits:** Build and provenance verification share a 16 MiB
+  artifact limit.
+- **Fixture validation:** The current libpng fixtures receive semantic PNG
+  checks, including bounded decompression and CRC validation.
+- **Adapter configuration:** The current adapter configuration schema is
+  version 4.
+
+### Campaign storage and failed-build recovery
+
+- **F-07 storage:** Campaign output is directed to a dedicated ext4 filesystem
+  backed by an exact 4 GiB image. The storage verifier checks the expected
+  filesystem UUID, mountpoint, backing image, ownership, permissions and
+  mount options. This enforces an aggregate filesystem capacity ceiling for
+  the configured pilot storage.
+- **F-08 recovery:** A manual recovery CLI validates eligible failed or
+  interrupted build metadata and archives the build directory
+  non-destructively. It preserves logs and partial outputs and publishes a
+  recovery manifest without overwriting an existing archive.
+
+### Remaining limitations
+
+- Source verification is point-in-time. The source tree remains mutable
+  between verification and compiler reads, so the TOCTOU risk is not fully
+  eliminated.
+- Some path checks remain subject to filesystem race conditions.
+- The 4 GiB storage filesystem does not provide per-campaign reservations or
+  an application-managed minimum-free-space threshold. Full-filesystem
+  failure behavior has not been established through fault injection.
+- Failed-build recovery is a manual archival workflow. Automatic retry,
+  restart and cleanup are not implemented.
+- Tool binaries are version-checked but not cryptographically pinned.
+- Python `preexec_fn` remains a potential deadlock concern in a multithreaded
+  host process.
+- An orchestrator killed with SIGKILL cannot execute its own cleanup handler.
+
+**Final closeout assessment (2026-11-18):** The independent read-only audit
+of implementation commit `a55326e0a58680895ce82de5b0b2b3056f8f1669`
+returned **APPROVED WITH ACCEPTED LIMITATIONS**. The auditor identified no
+blocking defects. P2-006, P2-008 and P2-009 retain specific non-blocking
+follow-up items; these are recorded in the Phase 2 security remediation report
+and must not be described as fully resolved. The auditor independently
+compiled the Python sources and passed all 166 tests.
+
+The remaining limitations above remain part of the accepted Phase 2
+assessment. This closeout applies to the initial libpng 1.6.59 pilot; it does
+not claim that future KEKKAI capabilities such as crash intelligence,
+cross-version comparison, source intelligence, dashboard or AI assistance
+are implemented.
+
+The owner has approved documentation closeout and preparation for integration.
+The remediation branch is being proposed to `development` for review; it has
+not been merged into `development` or `main`. No new live fuzzing campaign
+was started during this remediation. Phase 3 implementation remains separate.
+
+See [Phase 2 Security Remediation Verification](tasks/PHASE2_SECURITY_REMEDIATION.md)
+for finding-by-finding status, evidence and limitations.
+
+
 ## Phase 3 — Crash evidence, reproduction and persistence
 
 **Goal:** Make every interesting observation reviewable and recoverable.
