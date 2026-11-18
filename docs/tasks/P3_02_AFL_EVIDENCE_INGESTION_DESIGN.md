@@ -1,6 +1,6 @@
 # P3-02 Design: Immutable AFL Crash/Hang Evidence Ingestion
 
-**Status:** Proposed for independent read-only review  
+**Status:** Approved for implementation after independent read-only review  
 **Base:** `development` at `bc738fbcbd0febcaa728440265601285d3295138`  
 **Feature branch:** `feature/p3-02-afl-evidence-ingestion`  
 **Scope:** Offline ingestion of terminal, single-worker libpng AFL++ campaigns into the P3-01 evidence store.  
@@ -99,7 +99,7 @@ The service must validate the complete campaign before the first write:
 | Target name / version | Campaign JSON, cross-checked with adapter and build metadata |
 | Source archive/tree hashes and source paths | Verified `build.json` and adapter |
 | Build metadata hash / build artifact hashes | Campaign-v2 identity plus verified `build.json` |
-| Compiler path/version, CMake build type, AFL++ version and sanitizer environment | Verified build commands/cache/environment and campaign-time validation evidence |
+| Compiler path/version, CMake build type, AFL++ version and sanitizer environment | Verified build command/cache/environment plus structured campaign-v2 `toolchain` facts and the deterministic profile mapping above |
 | Campaign UID, paths, command, limits, status and timestamps | Terminal campaign JSON and exact adapter |
 | Adapter-config hash and seed manifest hash/count | Campaign-v2 identity, recomputed and matched at import |
 | Total executions / saved crash/hang counts / reported timeout | Bounded `fuzzer_stats` parser, where the corresponding key is present and validated |
@@ -142,7 +142,11 @@ Keep the source campaign directory as the original evidence. The evidence store 
 - Test suite passes on Python 3.11 and 3.14; full regression suite remains green.
 - Independent read-only implementation review has no unresolved blockers or important issues.
 
-## 10. Review references
+## 10. Independent review closeout
+
+The read-only design review returned **APPROVED FOR IMPLEMENTATION**, with no blockers. Implementation must incorporate I01 (deterministic non-null database mappings and structured toolchain facts), I02 (filename bounds/duplicate-token rules and required crash/hang directories), and I03 (pre/post-copy source snapshots and integer-exact mtime conversion). Optional suggestions are to reject seed subdirectories and use named, testable import bounds; both are adopted above.
+
+## 11. Review references
 
 - Project workflow and mandatory gates: `docs/WORKFLOW_DECISIONS.md`, Sections 8, 9 and 11.
 - Phase 3 goals/acceptance: `docs/DEVELOPMENT_PLAN.md`, Phase 3.
