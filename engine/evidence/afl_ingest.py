@@ -888,7 +888,7 @@ def _validate_campaign(
         build_metadata=build_metadata,
         build_metadata_path=Path(build_metadata_path),
         build_metadata_snapshot=build_metadata_snapshot,
-        build_metadata_sha256=build_metadata_hash.sha256,
+        build_metadata_sha256=build_hash.sha256,
         identity=identity,
         toolchain=toolchain_values,
         command=command,
