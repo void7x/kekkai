@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.evidence.seed_manifest import SeedManifestError, build_seed_manifest, hash_stable_file
 from engine.build.libpng import BuildError
 from engine.build.runner import BuildState, run_libpng_build
 from engine.fuzzing.coverage import validate_coverage
@@ -239,6 +240,53 @@ def _paths_overlap(first: Path, second: Path) -> bool:
     )
 
 
+def _campaign_identity(config: AdapterConfig, provenance, coverage):
+    """Capture launch-time adapter, seed, build and toolchain identities."""
+    if config.schema_version < 4:
+        return None, None
+    if config.build is None:
+        raise CampaignError("Schema-4 campaign metadata requires a verified build configuration.")
+    compiler_path = getattr(provenance, "compiler_path", None)
+    compiler_version = getattr(provenance, "compiler_version", None)
+    aflpp_version = getattr(provenance, "aflpp_version", None)
+    afl_showmap_version = getattr(coverage, "tool_version", None)
+    if not all(isinstance(value, str) and value.strip() for value in (
+        compiler_path, compiler_version, aflpp_version, afl_showmap_version
+    )):
+        raise CampaignError("Verified provenance did not provide complete structured toolchain identities.")
+    if aflpp_version != config.fuzzer.expected_version:
+        raise CampaignError("Observed AFL++ version does not match the configured campaign version.")
+    try:
+        adapter_path = config.config_path.resolve(strict=True)
+        seed_dir = config.target.seed_dir.resolve(strict=True)
+        build_dir = config.build.build_dir.resolve(strict=True)
+        adapter_hash = hash_stable_file(adapter_path)
+        seed_manifest = build_seed_manifest(
+            seed_dir,
+            max_file_bytes=config.limits.max_input_bytes,
+        )
+        build_metadata_path = build_dir / "build.json"
+        build_metadata_hash = hash_stable_file(build_metadata_path, max_bytes=1024 * 1024)
+    except (OSError, ValueError, RuntimeError, SeedManifestError) as exc:
+        raise CampaignError(f"Could not capture campaign launch identity: {exc}") from exc
+    identity = {
+        "adapter_config_path": str(adapter_path),
+        "adapter_config_sha256": adapter_hash.sha256,
+        "seed_dir": str(seed_dir),
+        "seed_manifest_sha256": seed_manifest.sha256,
+        "seed_count": seed_manifest.seed_count,
+        "build_metadata_path": str(build_metadata_path),
+        "build_metadata_sha256": build_metadata_hash.sha256,
+    }
+    toolchain = {
+        "compiler_path": compiler_path,
+        "compiler_version": compiler_version,
+        "aflpp_version": aflpp_version,
+        "afl_showmap_version": afl_showmap_version,
+    }
+    return identity, toolchain
+
+
 @process_groups_guarded
 def _execute_campaign(
     config: AdapterConfig,
@@ -246,6 +294,8 @@ def _execute_campaign(
     afl_fuzz_path: str | Path,
     validation_evidence: dict[str, object],
     *,
+    campaign_identity: dict[str, object] | None = None,
+    toolchain: dict[str, object] | None = None,
     _process_registry: ProcessGroupRegistry,
 ) -> CampaignResult:
     """Execute one bounded AFL++ worker and preserve its campaign record."""
@@ -296,7 +346,7 @@ def _execute_campaign(
     log_errors: list[str] = []
 
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2 if campaign_identity is not None else 1,
         "campaign_id": campaign_id,
         "status": CampaignState.RUNNING.value,
         "target": {
@@ -325,6 +375,11 @@ def _execute_campaign(
         "exit_code": None,
         "message": "Campaign initialized.",
     }
+    if campaign_identity is not None:
+        if toolchain is None or config.schema_version < 4:
+            raise CampaignError("Schema-v2 campaign metadata requires captured toolchain identities.")
+        metadata["identity"] = campaign_identity
+        metadata["toolchain"] = toolchain
     try:
         _write_metadata(campaign_dir, metadata)
     except OSError as exc:
@@ -659,9 +714,13 @@ def run_campaign(
     if clean_build_evidence is not None:
         validation_evidence["clean_build"] = clean_build_evidence
 
+    campaign_identity, toolchain = _campaign_identity(config, provenance, coverage)
+
     return _execute_campaign(
         config,
         root,
         Path(fuzzer_path).resolve(strict=True),
         validation_evidence,
+        campaign_identity=campaign_identity,
+        toolchain=toolchain,
     )

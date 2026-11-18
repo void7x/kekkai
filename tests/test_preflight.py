@@ -314,6 +314,17 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(self.check(report, "seed_corpus").status, "failed")
 
+    def test_rejects_seed_subdirectory(self) -> None:
+        nested = self.seed_dir / "nested"
+        nested.mkdir()
+        (nested / "nested-seed.png").write_bytes(b"nested")
+
+        report = self.run_preflight()
+
+        self.assertFalse(report.passed)
+        self.assertEqual(self.check(report, "seed_corpus").status, "failed")
+        self.assertIn("Subdirectories", self.check(report, "seed_corpus").message)
+
     def test_rejects_seed_directory_entry_limit(self) -> None:
         (self.seed_dir / "extra.png").write_bytes(b"extra")
 

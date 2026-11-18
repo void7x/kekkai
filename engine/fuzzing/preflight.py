@@ -377,8 +377,7 @@ def validate_adapter(
                             too_large = True
                             break
                     elif entry.is_dir(follow_symlinks=False):
-                        # AFL++ seeds are expected as direct files.
-                        continue
+                        unsafe_entries.append(entry.name)
                     else:
                         unsafe_entries.append(entry.name)
 
@@ -415,7 +414,7 @@ def validate_adapter(
                 add(
                     "seed_corpus",
                     "failed",
-                    "Symlink or special entries are not allowed: "
+                    "Subdirectories, symlinks or special entries are not allowed: "
                     + unsafe_preview,
                 )
             elif not non_empty_seed_files:
