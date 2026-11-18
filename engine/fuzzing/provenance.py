@@ -39,6 +39,9 @@ class ProvenanceReport:
     target_name: str
     target_version: str
     checks: tuple[ProvenanceCheck, ...]
+    compiler_path: str | None = None
+    compiler_version: str | None = None
+    aflpp_version: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -209,6 +212,8 @@ def _verify_adapter_build_provenance(
 ) -> ProvenanceReport:
     """Verify artifacts produced by the schema-v2 adapter build runner."""
     checks: list[ProvenanceCheck] = []
+    compiler_line: str | None = None
+    afl_version: str | None = None
 
     def add(name: str, passed: bool, message: str) -> None:
         checks.append(
@@ -504,6 +509,9 @@ def _verify_adapter_build_provenance(
         target_name=config.target.name,
         target_version=config.target.version,
         checks=tuple(checks),
+        compiler_path=str(_PINNED_COMPILER),
+        compiler_version=compiler_line,
+        aflpp_version=afl_version,
     )
 
 
