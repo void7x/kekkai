@@ -136,6 +136,25 @@ class EvidenceStoreTests(unittest.TestCase):
         report = self.store.verify_evidence_store(self.connection)
         self.assertIn(orphan.storage_relpath.split("objects/sha256/", 1)[1], " ".join(report.unreferenced))
 
+    def test_verifier_flags_all_unexpected_staging_entries(self):
+        ordinary = self.root / "staging" / "unexpected.tmp"
+        ordinary.write_bytes(b"leftover")
+        symlink = self.root / "staging" / "foreign-link"
+        symlink.symlink_to(ordinary)
+        report = self.store.verify_evidence_store(self.connection)
+        self.assertFalse(report.passed)
+        self.assertEqual(set(report.stale_staging), {"unexpected.tmp", "foreign-link"})
+
+    def test_verifier_rejects_invalid_shard_names_and_permissions(self):
+        invalid_name = self.root / "objects/sha256/ZZ"
+        invalid_name.mkdir(mode=0o700)
+        invalid_mode = self.root / "objects/sha256/aa"
+        invalid_mode.mkdir(mode=0o700)
+        invalid_mode.chmod(0o777)
+        report = self.store.verify_evidence_store(self.connection)
+        self.assertIn("ZZ", report.corrupt)
+        self.assertIn("aa", report.corrupt)
+
     def test_symlink_component_in_store_root_is_rejected(self):
         actual = self.base / "real-parent"
         actual.mkdir()
