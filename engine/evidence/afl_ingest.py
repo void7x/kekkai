@@ -36,12 +36,6 @@ MAX_SQLITE_INTEGER = (1 << 63) - 1
 EXPECTED_COMPILER_PATH = "/usr/bin/afl-clang-fast"
 EXPECTED_COMPILER_VERSION = "Ubuntu clang version 21.1.8 (6ubuntu1)"
 EXPECTED_CMAKE_BUILD_TYPE = "RelWithDebInfo"
-EXPECTED_BUILD_ENVIRONMENT = {
-    "PATH": os.defpath,
-    "LC_ALL": "C",
-    "AFL_USE_UBSAN": "1",
-    "AFL_DEBUG": "1",
-}
 SANITIZER_CONFIG = {
     "afl_debug": "1",
     "afl_use_ubsan": "1",
@@ -109,8 +103,14 @@ class _CampaignContext:
     metadata: dict[str, Any]
     metadata_sha256: str
     metadata_snapshot: tuple[int, int, int, int, int]
+    campaign_directory_snapshot: tuple[int, int, int, int, int]
+    afl_output_directory_snapshot: tuple[int, int, int, int, int]
+    worker_directory_snapshot: tuple[int, int, int, int, int]
     build_metadata: dict[str, Any]
+    build_metadata_path: Path
+    build_metadata_snapshot: tuple[int, int, int, int, int]
     build_metadata_sha256: str
+    identity: dict[str, Any]
     toolchain: dict[str, str]
     command: tuple[str, ...]
     afl_max_generated_bytes: int
@@ -512,7 +512,7 @@ def _detect_worker_root(afl_output_dir: Path, expected_device: int) -> tuple[Pat
             )
         extra_directories = [
             name for name, info in entries.items()
-            if stat.S_ISDIR(info.st_mode) and name not in {"crashes", "hangs"}
+            if stat.S_ISDIR(info.st_mode) and name not in {"crashes", "hangs", "queue"}
         ]
         if extra_directories:
             raise AflIngestError("Multi-worker or unexpected AFL output directories are not supported.")
@@ -576,7 +576,15 @@ def _verify_build_metadata(
             raise AflIngestError(f"build.json field {key!r} does not match the campaign adapter.")
     if config.build.profile != "libpng-afl-ubsan" or config.target.version != "1.6.59":
         raise AflIngestError("Only the validated libpng 1.6.59 AFL++ UBSan build is supported.")
-    if metadata.get("environment") != EXPECTED_BUILD_ENVIRONMENT:
+    environment = metadata.get("environment")
+    if (
+        not isinstance(environment, dict)
+        or not isinstance(environment.get("PATH"), str)
+        or not environment.get("PATH")
+        or environment.get("LC_ALL") != "C"
+        or environment.get("AFL_USE_UBSAN") != "1"
+        or environment.get("AFL_DEBUG") != "1"
+    ):
         raise AflIngestError("build.json environment differs from the verified libpng AFL++ UBSan profile.")
     if metadata.get("source_archive_path") != str(config.target.source_archive):
         raise AflIngestError("build.json source archive path does not match the adapter.")
@@ -646,7 +654,15 @@ def _verify_build_metadata(
         verified_hashes[key] = expected_hash
 
     cache_path = config.build.build_dir / "CMakeCache.txt"
-    cache_raw = cache_path.read_text(encoding="utf-8")
+    cache_fd = _open_directory(cache_path.parent)
+    try:
+        cache_bytes, _ = _read_file_at(cache_fd, cache_path.name, maximum=MAX_ARTIFACT_BYTES)
+    finally:
+        os.close(cache_fd)
+    try:
+        cache_raw = cache_bytes.decode("utf-8")
+    except UnicodeError as exc:
+        raise AflIngestError("CMakeCache.txt is not UTF-8.") from exc
     build_types = [
         line.split("=", 1)[1]
         for line in cache_raw.splitlines()
@@ -874,7 +890,28 @@ def _validate_campaign(
     return context, (str(config.target.source_dir), str(config.build.build_dir), str(config.target.output_parent))
 
 
+def _directory_identity(path: Path, expected_device: int) -> tuple[int, int, int, int, int]:
+    descriptor = _open_directory(path, expected_device=expected_device)
+    try:
+        return _snapshot(os.fstat(descriptor))
+    finally:
+        os.close(descriptor)
+
+
+def _verify_directory_identity(
+    path: Path,
+    expected_snapshot: tuple[int, int, int, int, int],
+    expected_device: int,
+) -> None:
+    if _directory_identity(path, expected_device) != expected_snapshot:
+        raise AflIngestError(f"Campaign directory structure changed during ingestion: {path}")
+
+
 def _verify_campaign_metadata_unchanged(context: _CampaignContext) -> None:
+    _verify_directory_identity(
+        context.campaign_dir, context.campaign_directory_snapshot,
+        context.campaign_directory_snapshot[0],
+    )
     campaign_fd = _open_directory(context.campaign_dir)
     try:
         raw, snapshot = _read_file_at(
@@ -889,6 +926,12 @@ def _verify_campaign_metadata_unchanged(context: _CampaignContext) -> None:
 
 
 def _verify_source_directories_unchanged(context: _CampaignContext, expected_device: int) -> None:
+    _verify_directory_identity(
+        context.afl_output_dir, context.afl_output_directory_snapshot, expected_device
+    )
+    _verify_directory_identity(
+        context.worker_root, context.worker_directory_snapshot, expected_device
+    )
     _verify_directory_snapshot(context.crash_directory, expected_device)
     _verify_directory_snapshot(context.hang_directory, expected_device)
 
@@ -1016,6 +1059,7 @@ def ingest_afl_campaign(
                 expected_device = campaign_info.st_dev
                 _verify_source_directories_unchanged(context, expected_device)
                 _verify_campaign_metadata_unchanged(context)
+                _verify_campaign_identity_sources_unchanged(context)
 
                 recorded_at = utc_now_iso()
                 repository = EvidenceRepository(connection)
@@ -1072,7 +1116,7 @@ def ingest_afl_campaign(
                 )
             finally:
                 connection.close()
-    except (EvidenceStoreError, sqlite3.Error, OSError, SeedManifestError, StorageError, ValueError) as exc:
+    except (EvidenceStoreError, sqlite3.Error, OSError, SeedManifestError, StorageError, ValueError, RuntimeError) as exc:
         if isinstance(exc, AflIngestError):
             raise
         raise AflIngestError(f"AFL++ evidence ingestion failed: {exc}") from exc
