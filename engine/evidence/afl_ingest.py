@@ -811,7 +811,11 @@ def _validate_campaign(
             os.close(build_fd)
     except (OSError, SeedManifestError) as exc:
         raise AflIngestError(f"Cannot verify campaign build metadata: {exc}") from exc
-    if build_hash.sha256 != build_metadata_hash:
+    if (
+        build_hash.sha256 != build_metadata_hash
+        or hashlib.sha256(build_raw).hexdigest() != build_metadata_hash
+        or build_metadata_snapshot != build_hash.snapshot
+    ):
         raise AflIngestError("build.json changed after the campaign started.")
     build_metadata = _load_json_bytes(build_raw, "build.json")
     toolchain_values = {}
@@ -845,7 +849,9 @@ def _validate_campaign(
     if command[0] != _require_string(fuzzer, "executable", "fuzzer"):
         raise AflIngestError("Recorded command executable differs from campaign fuzzer metadata.")
     expected_device = storage_device
+    afl_output_directory_snapshot = _directory_identity(afl_output_dir, expected_device)
     worker_root, worker_name, worker_device = _detect_worker_root(afl_output_dir, expected_device)
+    worker_directory_snapshot = _directory_identity(worker_root, worker_device)
     worker_fd = _open_directory(worker_root, expected_device=worker_device)
     try:
         worker_entries = set(os.listdir(worker_fd))
@@ -876,8 +882,14 @@ def _validate_campaign(
         metadata=metadata,
         metadata_sha256=metadata_sha256,
         metadata_snapshot=metadata_snapshot,
+        campaign_directory_snapshot=_snapshot(campaign_info),
+        afl_output_directory_snapshot=afl_output_directory_snapshot,
+        worker_directory_snapshot=worker_directory_snapshot,
         build_metadata=build_metadata,
+        build_metadata_path=Path(build_metadata_path),
+        build_metadata_snapshot=build_metadata_snapshot,
         build_metadata_sha256=build_metadata_hash.sha256,
+        identity=identity,
         toolchain=toolchain_values,
         command=command,
         afl_max_generated_bytes=afl_max_generated_bytes,
@@ -934,6 +946,48 @@ def _verify_source_directories_unchanged(context: _CampaignContext, expected_dev
     )
     _verify_directory_snapshot(context.crash_directory, expected_device)
     _verify_directory_snapshot(context.hang_directory, expected_device)
+
+
+def _verify_campaign_identity_sources_unchanged(context: _CampaignContext) -> None:
+    identity = context.identity
+    adapter_hash = hash_stable_file(context.config.config_path, max_bytes=MAX_IDENTITY_FILE_BYTES)
+    if adapter_hash.sha256 != identity["adapter_config_sha256"]:
+        raise AflIngestError("Adapter TOML changed during evidence ingestion.")
+    seed_manifest = build_seed_manifest(
+        context.config.target.seed_dir,
+        max_file_bytes=context.config.limits.max_input_bytes,
+    )
+    if (
+        seed_manifest.sha256 != identity["seed_manifest_sha256"]
+        or seed_manifest.seed_count != identity["seed_count"]
+    ):
+        raise AflIngestError("Seed corpus changed during evidence ingestion.")
+    build_hash = hash_stable_file(
+        context.build_metadata_path,
+        max_bytes=MAX_CAMPAIGN_METADATA_BYTES,
+    )
+    parent_fd = _open_directory(context.build_metadata_path.parent)
+    try:
+        raw, snapshot = _read_file_at(
+            parent_fd,
+            context.build_metadata_path.name,
+            maximum=MAX_CAMPAIGN_METADATA_BYTES,
+        )
+    finally:
+        os.close(parent_fd)
+    if (
+        build_hash.sha256 != context.build_metadata_sha256
+        or hashlib.sha256(raw).hexdigest() != context.build_metadata_sha256
+        or snapshot != context.build_metadata_snapshot
+        or build_hash.snapshot != context.build_metadata_snapshot
+    ):
+        raise AflIngestError("build.json changed during evidence ingestion.")
+    _verify_build_metadata(
+        context.config,
+        context.build_metadata,
+        context.toolchain,
+        context.identity,
+    )
 
 
 def _campaign_record(context: _CampaignContext, ids: dict[str, int], recorded_at: str) -> dict[str, object]:
