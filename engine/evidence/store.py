@@ -627,7 +627,15 @@ class EvidenceStore:
                         try:
                             for filename in sorted(os.listdir(second_fd)):
                                 digest = filename[:-4] if filename.endswith(".bin") else ""
-                                if digest not in expected:
+                                canonical_location = (
+                                    len(digest) == 64
+                                    and all(char in "0123456789abcdef" for char in digest)
+                                    and digest in expected
+                                    and filename == digest + ".bin"
+                                    and first == digest[:2]
+                                    and second == digest[2:4]
+                                )
+                                if not canonical_location:
                                     unreferenced.append(
                                         f"{first}/{second}/{filename}"
                                     )
