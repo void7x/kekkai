@@ -18,6 +18,7 @@ from .store import EvidenceStoreError, _open_directory_path
 
 
 MIGRATION_001_SHA256 = "732097720fba2a367a2278f8c34384294ea75676deecfc6c198464a78208d87f"
+MIGRATION_002_SHA256 = "ffee032dd01b725d23b7d12e7b3c78e18cc36c34ae1c39c8c1bb5bd26eee7b89"
 DEFAULT_MIN_FREE_RESERVE_BYTES = 64 * 1024 * 1024
 SQLITE_WAL_HEADROOM_BYTES = 4 * 1024 * 1024
 MIN_FREE_INODES = 64
@@ -41,6 +42,12 @@ MIGRATIONS = (
         name="001_initial_evidence_schema",
         path=Path(__file__).with_name("sql") / "001_initial_evidence_schema.sql",
         checksum_sha256=MIGRATION_001_SHA256,
+    ),
+    Migration(
+        version=2,
+        name="002_sanitizer_runs",
+        path=Path(__file__).with_name("sql") / "002_sanitizer_runs.sql",
+        checksum_sha256=MIGRATION_002_SHA256,
     ),
 )
 
