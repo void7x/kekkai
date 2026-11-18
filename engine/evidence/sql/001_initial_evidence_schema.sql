@@ -13,7 +13,10 @@ CREATE TABLE schema_migrations (
         AND substr(applied_at, 20, 1) = '.'
         AND substr(applied_at, 21, 6) NOT GLOB '*[^0-9]*'
         AND substr(applied_at, 27, 1) = 'Z'
-    )
+    ),
+    CHECK (instr(name, char(0)) = 0),
+    CHECK (instr(checksum_sha256, char(0)) = 0),
+    CHECK (instr(applied_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE targets (
@@ -29,7 +32,10 @@ CREATE TABLE targets (
         AND substr(created_at, 20, 1) = '.'
         AND substr(created_at, 21, 6) NOT GLOB '*[^0-9]*'
         AND substr(created_at, 27, 1) = 'Z'
-    )
+    ),
+    CHECK (instr(name, char(0)) = 0),
+    CHECK (instr(description, char(0)) = 0),
+    CHECK (instr(created_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE target_versions (
@@ -54,7 +60,13 @@ CREATE TABLE target_versions (
         AND substr(created_at, 27, 1) = 'Z'
     ),
     UNIQUE (target_id, version, source_tree_sha256),
-    UNIQUE (id, target_id)
+    UNIQUE (id, target_id),
+    CHECK (instr(version, char(0)) = 0),
+    CHECK (instr(source_archive_sha256, char(0)) = 0),
+    CHECK (instr(source_tree_sha256, char(0)) = 0),
+    CHECK (instr(source_dir_recorded, char(0)) = 0),
+    CHECK (instr(source_archive_path, char(0)) = 0),
+    CHECK (instr(created_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE builds (
@@ -140,13 +152,37 @@ CREATE TABLE builds (
          AND compile_database_sha256 IS NOT NULL
          AND generated_header_sha256 IS NOT NULL)
         OR build_status IN ('failed', 'interrupted')
-    )
+    ),
+    CHECK (instr(profile, char(0)) = 0),
+    CHECK (instr(build_role, char(0)) = 0),
+    CHECK (instr(build_dir, char(0)) = 0),
+    CHECK (instr(build_metadata_sha256, char(0)) = 0),
+    CHECK (instr(harness_source_path, char(0)) = 0),
+    CHECK (instr(harness_binary_path, char(0)) = 0),
+    CHECK (instr(harness_source_sha256, char(0)) = 0),
+    CHECK (instr(harness_binary_sha256, char(0)) = 0),
+    CHECK (instr(library_archive_sha256, char(0)) = 0),
+    CHECK (instr(cmake_cache_sha256, char(0)) = 0),
+    CHECK (instr(compile_database_sha256, char(0)) = 0),
+    CHECK (instr(generated_header_sha256, char(0)) = 0),
+    CHECK (instr(compiler_path, char(0)) = 0),
+    CHECK (instr(compiler_version, char(0)) = 0),
+    CHECK (instr(cmake_build_type, char(0)) = 0),
+    CHECK (instr(aflpp_version, char(0)) = 0),
+    CHECK (instr(sanitizer_config_json, char(0)) = 0),
+    CHECK (instr(environment_json, char(0)) = 0),
+    CHECK (instr(build_status, char(0)) = 0),
+    CHECK (instr(started_at, char(0)) = 0),
+    CHECK (instr(ended_at, char(0)) = 0),
+    CHECK (instr(recorded_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE campaigns (
     id INTEGER PRIMARY KEY,
     campaign_uid TEXT NOT NULL UNIQUE CHECK (
         length(campaign_uid) = 38
+        AND length(CAST(campaign_uid AS BLOB)) = 38
+        AND instr(campaign_uid, char(0)) = 0
         AND substr(campaign_uid, 1, 9) = 'campaign-'
         AND substr(campaign_uid, 10, 8) NOT GLOB '*[^0-9]*'
         AND substr(campaign_uid, 18, 1) = 'T'
@@ -213,7 +249,22 @@ CREATE TABLE campaigns (
     ),
     FOREIGN KEY (build_id, target_id, target_version_id)
         REFERENCES builds(id, target_id, target_version_id) ON DELETE RESTRICT,
-    UNIQUE (id, target_id, target_version_id, build_id)
+    UNIQUE (id, target_id, target_version_id, build_id),
+    CHECK (instr(campaign_uid, char(0)) = 0),
+    CHECK (instr(adapter_config_path, char(0)) = 0),
+    CHECK (instr(adapter_config_sha256, char(0)) = 0),
+    CHECK (instr(campaign_dir, char(0)) = 0),
+    CHECK (instr(afl_output_dir, char(0)) = 0),
+    CHECK (instr(campaign_metadata_sha256, char(0)) = 0),
+    CHECK (instr(seed_dir, char(0)) = 0),
+    CHECK (instr(seed_manifest_sha256, char(0)) = 0),
+    CHECK (instr(fuzzer_executable, char(0)) = 0),
+    CHECK (instr(fuzzer_version, char(0)) = 0),
+    CHECK (instr(command_json, char(0)) = 0),
+    CHECK (instr(status, char(0)) = 0),
+    CHECK (instr(started_at, char(0)) = 0),
+    CHECK (instr(ended_at, char(0)) = 0),
+    CHECK (instr(recorded_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE artifacts (
@@ -246,7 +297,11 @@ CREATE TABLE artifacts (
         AND substr(last_verified_at, 21, 6) NOT GLOB '*[^0-9]*'
         AND substr(last_verified_at, 27, 1) = 'Z'
         AND last_verified_at >= first_ingested_at
-    )
+    ),
+    CHECK (instr(sha256, char(0)) = 0),
+    CHECK (instr(storage_relpath, char(0)) = 0),
+    CHECK (instr(first_ingested_at, char(0)) = 0),
+    CHECK (instr(last_verified_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TABLE observations (
@@ -294,7 +349,14 @@ CREATE TABLE observations (
         REFERENCES campaigns(id, target_id, target_version_id, build_id) ON DELETE RESTRICT,
     UNIQUE (campaign_id, afl_worker_name, observation_kind, afl_source_filename),
     UNIQUE (id, target_id),
-    UNIQUE (id, target_id, target_version_id, build_id, campaign_id)
+    UNIQUE (id, target_id, target_version_id, build_id, campaign_id),
+    CHECK (instr(observation_uid, char(0)) = 0),
+    CHECK (instr(observation_kind, char(0)) = 0),
+    CHECK (instr(afl_worker_name, char(0)) = 0),
+    CHECK (instr(afl_source_filename, char(0)) = 0),
+    CHECK (instr(afl_input_id, char(0)) = 0),
+    CHECK (instr(source_file_mtime_utc, char(0)) = 0),
+    CHECK (instr(ingested_at, char(0)) = 0)
 ) STRICT;
 
 CREATE TRIGGER prevent_artifact_deletion
