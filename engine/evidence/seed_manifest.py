@@ -136,8 +136,8 @@ def build_seed_manifest(
 ) -> SeedManifest:
     """Build a deterministic manifest of direct regular seed files.
 
-    Plain direct subdirectories are ignored, matching adapter preflight's
-    current AFL seed-directory contract. Symlinks and special files fail closed.
+    Only direct regular files are accepted. Subdirectories, symlinks and
+    special files fail closed so every accepted seed is included in the identity.
     """
     if max_entries < 1 or max_total_bytes < 0:
         raise ValueError("Seed manifest limits are invalid.")
@@ -148,7 +148,6 @@ def build_seed_manifest(
             raise SeedManifestError(f"Seed directory exceeds the {max_entries}-entry limit.")
 
         snapshots: dict[str, tuple[int, int, int, int, int]] = {}
-        entry_types: dict[str, str] = {}
         entries: list[tuple[str, int, str]] = []
         total_bytes = 0
 
@@ -157,9 +156,7 @@ def build_seed_manifest(
             if stat.S_ISLNK(info.st_mode):
                 raise SeedManifestError(f"Symlink is not allowed in the seed corpus: {name}")
             if stat.S_ISDIR(info.st_mode):
-                entry_types[name] = "directory"
-                snapshots[name] = _snapshot(info)
-                continue
+                raise SeedManifestError(f"Subdirectories are not allowed in the seed corpus: {name}")
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
                 raise SeedManifestError(f"Seed entry is not a regular user-owned file: {name}")
             if info.st_size < 0 or (max_file_bytes is not None and info.st_size > max_file_bytes):
@@ -168,7 +165,6 @@ def build_seed_manifest(
             if total_bytes > max_total_bytes:
                 raise SeedManifestError(f"Seed corpus exceeds the {max_total_bytes}-byte total limit.")
             snapshots[name] = _snapshot(info)
-            entry_types[name] = "file"
 
             descriptor = os.open(
                 name,
