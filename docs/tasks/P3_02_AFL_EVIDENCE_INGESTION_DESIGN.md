@@ -1,10 +1,10 @@
 # P3-02 Design: Immutable AFL Crash/Hang Evidence Ingestion
 
-**Status:** Approved for implementation after independent read-only review  
+**Status:** Approved for implementation; implementation in progress and verification pending  
 **Base:** `development` at `bc738fbcbd0febcaa728440265601285d3295138`  
 **Feature branch:** `feature/p3-02-afl-evidence-ingestion`  
 **Scope:** Offline ingestion of terminal, single-worker libpng AFL++ campaigns into the P3-01 evidence store.  
-**No implementation has started.**
+**Implementation:** In progress on this feature branch. Test verification is pending.
 
 ## 1. Goal
 
@@ -35,7 +35,7 @@ Update the campaign runner to emit `campaign.json` schema version 2. Before the 
 
 Also record a structured `toolchain` object with `compiler_version` and `aflpp_version` from the successful build-provenance result, plus `afl_showmap_version` from the successful coverage result. Do not make the importer parse human-readable report strings. The expected AFL++ version must match the observed `aflpp_version`.
 
-The seed-manifest helper must enforce the existing preflight bounds (maximum 4,096 direct entries and 512 MiB total), reject symlinks and special files, open files without following links, and detect a file changing while it is hashed. It must produce deterministic canonical JSON and a stable digest.
+The seed-manifest helper must enforce the existing preflight bounds (maximum 4,096 direct entries and 512 MiB total), reject direct subdirectories, symlinks and special files, open files without following links, and detect a file changing while it is hashed. Adapter preflight must enforce the same direct-file-only rule. It must produce deterministic canonical JSON and a stable digest.
 
 At import time, recompute and compare the adapter-config, seed-manifest and build-metadata hashes. A missing or changed input means the importer cannot establish the original campaign provenance and must refuse the import before publishing or inserting anything.
 
@@ -74,7 +74,7 @@ The service must validate the complete campaign before the first write:
 3. **Build and target provenance**
    - Validate the current schema-v2 `build.json`, its campaign-captured hash, terminal completed state, target/version/profile/build-directory identity and recorded build-step structure.
    - Re-hash the six recorded build outputs and require them to match `build.json`; verify the pinned source archive/tree identity and harness identity against their recorded hashes and fixed build contract.
-   - Do not re-run compiler or AFL++ version probes during historical import. Use the exact campaign-time version facts preserved in the successful provenance report inside `campaign.json`; refuse the import if required facts are absent or malformed.
+   - Do not re-run compiler or AFL++ version probes during historical import. Use the structured campaign-time `toolchain` facts captured from the successful build-provenance and coverage results before AFL++ launched; refuse the import if required facts are absent or malformed.
    - Populate target, target-version and build records only from these verified records. Never infer a missing compiler version or substitute the currently installed version for a campaign-time version.
    - The deterministic `builds` mapping for this fixed profile is: `build_role='fuzz'`; `compiler_path='/usr/bin/afl-clang-fast'` from the verified recorded build command; `compiler_version` from the campaign-v2 structured toolchain; `cmake_build_type='RelWithDebInfo'` from the verified CMake cache; `aflpp_version` from the campaign-v2 observed version; `afl_instrumented_locations=NULL` because the schema-v2 adapter build verifier does not record a numeric count; `sanitizer_config_json` equal to canonical JSON `{"afl_debug":"1","afl_use_ubsan":"1","profile":"libpng-afl-ubsan"}`; and `environment_json` equal to canonical JSON of the exact `build.json.environment` object. These values are fixed-profile constants or exact verified facts.
    - Populate campaign metadata only from the campaign JSON, its captured identity, the exact command and any validated AFL++ statistics. Specifically, `campaign_metadata_sha256` is the SHA-256 of the exact raw final `campaign.json` bytes read during stable validation, and `afl_max_generated_bytes` comes from the validated positive integer immediately following the sole `-G` argument in the recorded command; reject missing, duplicate or mismatched `-G` arguments.
