@@ -179,10 +179,11 @@ class AflIngestIntegrationTests(unittest.TestCase):
         self.worker_root = self.campaign_dir / "afl-output" / "default"
         self.crash_dir = self.worker_root / "crashes"
         self.hang_dir = self.worker_root / "hangs"
-        self.crash_dir.mkdir(parents=True, mode=0o700)
-        self.hang_dir.mkdir(mode=0o700)
-        self.worker_root.mkdir(mode=0o700)
         self.campaign_dir.mkdir(mode=0o700)
+        (self.campaign_dir / "afl-output").mkdir(mode=0o700)
+        self.worker_root.mkdir(mode=0o700)
+        self.crash_dir.mkdir(mode=0o700)
+        self.hang_dir.mkdir(mode=0o700)
         self.evidence_root = self.base / "evidence-store"
         self.config = AdapterConfig(
             schema_version=4,
