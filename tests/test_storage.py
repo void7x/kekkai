@@ -73,6 +73,13 @@ class CampaignStorageTests(unittest.TestCase):
                 "e8657221-eb6f-41ca-b087-76912b527e4b",
             )
 
+    def test_rejects_image_with_group_or_world_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = self.make_image(Path(temporary))
+            image.chmod(0o644)
+            with self.assertRaisesRegex(StorageError, "mode 0600"):
+                _read_ext4_uuid(image)
+
     def test_rejects_non_ext4_image(self):
         with tempfile.TemporaryDirectory() as temporary:
             image = self.make_image(Path(temporary))

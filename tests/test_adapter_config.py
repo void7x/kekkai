@@ -50,7 +50,8 @@ log_limit_bytes = 16777216
 class AdapterConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name) / "repository"
+        self.root.mkdir()
         self.config_path = self.root / "adapter.toml"
         self.config_path.write_text(VALID_TOML, encoding="utf-8")
 
@@ -256,6 +257,26 @@ class AdapterConfigTests(unittest.TestCase):
         real = work / "real-seeds"
         real.mkdir()
         (work / "seeds").symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load()
+
+    def test_rejects_symlinked_campaign_storage_image(self) -> None:
+        work = (self.root / "../kekkai-work").resolve()
+        work.mkdir(parents=True, exist_ok=True)
+        real = self.root / "real-campaign-storage.ext4"
+        real.write_bytes(b"fixture")
+        (work / "campaign-quota.ext4").symlink_to(real)
+
+        with self.assertRaisesRegex(AdapterConfigError, "symlink"):
+            self.load()
+
+    def test_rejects_symlinked_output_parent(self) -> None:
+        work = (self.root / "../kekkai-work").resolve()
+        work.mkdir(parents=True, exist_ok=True)
+        real = work / "real-output"
+        real.mkdir()
+        (work / "output").symlink_to(real, target_is_directory=True)
+
         with self.assertRaisesRegex(AdapterConfigError, "symlink"):
             self.load()
 

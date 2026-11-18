@@ -104,8 +104,8 @@ def _read_ext4_uuid(image: Path) -> str:
             )
         if info.st_uid != os.getuid():
             raise StorageError("Campaign storage image must be owned by the current user.")
-        if info.st_mode & 0o022:
-            raise StorageError("Campaign storage image must not be group- or world-writable.")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise StorageError("Campaign storage image must have private mode 0600.")
         superblock = os.pread(descriptor, 1024, 1024)
         if len(superblock) != 1024:
             raise StorageError("Could not read the complete ext4 superblock.")

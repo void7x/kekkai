@@ -7,8 +7,8 @@ filesystem UUID. `target.output_parent` is the mountpoint, not an ordinary
 fuzzing directory. The preflight and campaign executor verify all of the
 following before campaign output is created:
 
-- The image is a regular, current-user-owned 4 GiB file with a valid ext4
-  superblock and the pinned UUID.
+- The image is a regular, current-user-owned 4 GiB file with private mode
+  `0600`, a valid ext4 superblock and the pinned UUID.
 - The exact configured mountpoint is an ext4 mount exposing the filesystem
   root, with `nodev,nosuid,noexec` options.
 - The mount's device number matches `/proc/self/mountinfo`; its loop device's

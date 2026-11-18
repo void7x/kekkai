@@ -72,6 +72,10 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
         self.compiler.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
         self.compiler.chmod(0o755)
 
+        self.afl_fuzz = compiler_dir / "afl-fuzz"
+        self.afl_fuzz.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.afl_fuzz.chmod(0o755)
+
         self.archive = self.build_dir / "libpng16.a"
         self.archive.write_bytes(b"fake archive")
 
@@ -220,7 +224,7 @@ class AdapterBuildProvenanceTests(unittest.TestCase):
             patch("engine.build.source_identity.LIBPNG_SOURCE_ARCHIVE_SHA256",
                   self.source_archive_sha256),
             patch("engine.fuzzing.provenance.shutil.which",
-                  return_value="/usr/bin/afl-fuzz"),
+                  return_value=str(self.afl_fuzz)),
             patch("engine.fuzzing.provenance._PINNED_COMPILER",
                   self.compiler),
             patch("engine.fuzzing.provenance._run_bounded_version",
