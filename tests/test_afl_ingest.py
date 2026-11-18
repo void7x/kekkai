@@ -458,6 +458,86 @@ class AflIngestIntegrationTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_schema_v1_campaign_is_rejected_before_store_creation(self):
+        metadata_path = self.campaign_dir / "campaign.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["schema_version"] = 1
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with self.assertRaisesRegex(AflIngestError, "schema v1"):
+            self._ingest()
+        self.assertFalse(self.evidence_root.exists())
+
+    def test_missing_crash_or_hang_directory_is_rejected_before_store_creation(self):
+        self.hang_dir.rename(self.worker_root / "hangs-missing")
+
+        with self.assertRaisesRegex(AflIngestError, "crashes/ and hangs/"):
+            self._ingest()
+        self.assertFalse(self.evidence_root.exists())
+
+    def test_import_observation_and_byte_limits_are_enforced_before_store_creation(self):
+        with patch("engine.evidence.afl_ingest.MAX_IMPORT_OBSERVATIONS", 1):
+            with self.assertRaisesRegex(AflIngestError, "more than 1"):
+                self._ingest()
+        self.assertFalse(self.evidence_root.exists())
+
+        with patch("engine.evidence.afl_ingest.MAX_IMPORT_TOTAL_BYTES", 1):
+            with self.assertRaisesRegex(AflIngestError, "import budget"):
+                self._ingest()
+        self.assertFalse(self.evidence_root.exists())
+
+    def test_source_mutation_after_publication_prevents_database_commit(self):
+        from engine.evidence.store import EvidenceStore
+
+        original_publish = EvidenceStore.publish_file
+        mutated = False
+
+        def publish_then_mutate(store, source_path):
+            nonlocal mutated
+            stored = original_publish(store, source_path)
+            if not mutated:
+                Path(source_path).write_bytes(Path(source_path).read_bytes() + b"changed")
+                mutated = True
+            return stored
+
+        with patch(
+            "engine.evidence.afl_ingest.EvidenceStore.publish_file",
+            autospec=True,
+            side_effect=publish_then_mutate,
+        ):
+            with self.assertRaisesRegex(AflIngestError, "changed during ingestion"):
+                self._ingest()
+
+        connection = sqlite3.connect(self.evidence_root / "db" / "kekkai.db")
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM campaigns").fetchone(), (0,))
+            self.assertEqual(connection.execute("SELECT count(*) FROM artifacts").fetchone(), (0,))
+            self.assertEqual(connection.execute("SELECT count(*) FROM observations").fetchone(), (0,))
+        finally:
+            connection.close()
+
+    def test_transaction_failure_rolls_back_rows_and_allows_retry(self):
+        with patch(
+            "engine.evidence.afl_ingest.EvidenceRepository.insert_observation",
+            side_effect=RuntimeError("injected insert failure"),
+        ):
+            with self.assertRaisesRegex(AflIngestError, "injected insert failure"):
+                self._ingest()
+
+        connection = sqlite3.connect(self.evidence_root / "db" / "kekkai.db")
+        try:
+            for table in ("targets", "target_versions", "builds", "campaigns", "artifacts", "observations"):
+                self.assertEqual(
+                    connection.execute(f"SELECT count(*) FROM {table}").fetchone(),
+                    (0,),
+                    table,
+                )
+        finally:
+            connection.close()
+
+        retry = self._ingest()
+        self.assertEqual((retry.crash_count, retry.hang_count), (1, 1))
+
     def test_evidence_root_inside_checkout_is_refused_before_creation(self):
         project_root = Path(__file__).resolve().parents[1]
         protected_root = project_root / ".p3-02-evidence-root-must-not-exist"
