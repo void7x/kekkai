@@ -1,18 +1,18 @@
 # Phase 2 Security and Reliability Remediation Verification
 
 **Implementation started:** 2026-11-12
-**Report updated:** 2026-11-16
+**Report updated:** 2026-11-18
 **Working branch:** `fix/phase2-security-remediation`
 **Base commit:** `5883c98a9e383daf40045440d456c5afe222a94d`
-**State:** Locally implemented and tested. Not committed, pushed or merged.
+**State:** Implemented, committed and pushed to `fix/phase2-security-remediation`. Not merged.
 
-> Verification note: the latest recorded full test run completed with 143 tests passing. The Git working-tree review also reported a clean `git diff --check`. This report does not claim that tests were rerun during this document update.
+> Verification note: GitHub Actions run [#44253310644](https://github.com/void7x/kekkai/actions/runs/44253310644), on Ubuntu 24.04 with Python 3.11, compiled the Python sources and passed all 166 unit and integration tests (5.767 seconds). This automated run does not claim a new native build, coverage validation, or live AFL++ campaign.
 
 ## 1. Scope and change control
 
 This report records the Phase 2 security and reliability remediation for the initial libpng 1.6.59 pilot. It separates implemented controls, test evidence and residual limitations.
 
-All implementation changes remain on `fix/phase2-security-remediation`. The `main`, `development` and original feature branches were not modified. No commit, push or merge was performed. No new AFL++ campaign was launched as part of this remediation.
+Implementation changes are committed and pushed on `fix/phase2-security-remediation`. The `main`, `development` and original feature branches were not modified. No merge was performed. No new AFL++ campaign was launched as part of this remediation.
 
 ## 2. Remediation status
 
@@ -30,6 +30,24 @@ All implementation changes remain on `fix/phase2-security-remediation`. The `mai
 | N-02: timeout descendant cleanup | Implemented and tested | The process-group runner cleans descendants after timeout and interruption; build and campaign use registered process groups. |
 | N-03: artifact-size mismatch | Implemented and tested | Build and provenance verification share a 16 MiB artifact limit. Regression coverage rejects oversized artifacts. |
 | N-04: fixture semantic validity | Implemented and tested for the current libpng fixtures | Fixture validation checks PNG structure, CRCs, dimensions, interlacing, row sizes, chunk limits and image-data properties before harness execution. All 10 original fixtures passed validation. |
+
+## 2A. Independent audit findings: implementation and regression status
+
+The following records the current code-review status for findings P2-001 through P2-009. It is an implementation-status summary, not an independent auditor's final acceptance.
+
+| Finding | Current remediation status | Evidence / remaining qualification |
+|---|---|---|
+| P2-001: storage ownership and permissions | Implemented | The mounted filesystem root must be current-user-owned with mode 0700. The backing image must be current-user-owned with private mode 0600. Failed-build archive roots are checked for ownership and mode. Storage and recovery regression tests pass. |
+| P2-002: symlink handling across configured paths | Implemented with residual path-race limitation | Symlink components are checked for all configured path fields before resolution. Tests cover the source, archive, harness source/binary, seed directory, build directory, campaign storage image and output parent. Path-based checks remain subject to TOCTOU races, as documented. |
+| P2-003: process interruption and lifecycle | Implemented and regression-tested | The process registry checks interruption before child launch, applies per-group grace periods, handles registration races, and propagates managed-process SIGTERM interruption. Build and campaign integration tests pass. |
+| P2-004: storage mount helper | Implemented | The helper uses isolated Python invocation, quoted heredocs and argument passing; validates the image and paths before privileged loop/mount operations; then applies private mountpoint ownership and mode and verifies the result. |
+| P2-005: campaign metadata durability | Implemented | Metadata writes flush and fsync the temporary file, atomically replace the destination and fsync the containing directory. Initial, intermediate and final write failures are handled explicitly. |
+| P2-006: smoke fixture semantic checks | Implemented and regression-tested | PNG text separators, chunk-cache limits and pixel/dimension limits are checked. Harness diagnostics are captured and reported. Fixture and smoke regression tests pass. |
+| P2-007: build provenance validation | Implemented and regression-tested | Provenance inputs are size-bounded, hashes are computed from the bounded bytes, recorded build commands are checked, and AFL++ version is compared with adapter configuration. CI tests use an isolated fake AFL++ executable rather than assuming a host package is installed. |
+| P2-008: failed-build archive path/ownership | Implemented and regression-tested | Archive-root path overlap, symlink, directory type, ownership and mode checks are present. Recovery regression tests cover ownership, permissions and overlap. |
+| P2-009: coverage-map validation and output handling | Implemented and regression-tested for the issues identified in the available audit summary | Coverage-map locations are normalized before duplicate detection, map reads are no-follow and size-bounded, and truncated output uses actual line breaks. Coverage regression tests pass. The detailed P2-008/P2-009 recommendation pages were not present in the supplied audit excerpt, so final auditor confirmation remains pending. |
+
+**Closeout status:** The branch now has regression coverage for the identified issues and CI passes. Keep Phase 2 pending until the independent auditor confirms the complete findings, including the full P2-008 and P2-009 details, and the owner completes the remaining local environment checks.
 
 ## 3. Source authentication and build provenance
 
@@ -121,15 +139,11 @@ Command:
 
 `python3 -m unittest discover -s tests -v`
 
-**Latest recorded result: 143 tests passed, 0 failures, 0 errors (5.868 seconds).**
+**Latest verified result: 166 tests passed, 0 failures, 0 errors (5.767 seconds) in GitHub Actions run #44253310644.**
 
 The suite includes the external-SIGTERM build and campaign integration tests, failed-build recovery tests, process-group tests, source identity tests and storage verification tests.
 
-The working-tree review also ran:
-
-`git diff --check`
-
-**Result: passed with no whitespace errors.**
+Python compilation (`python -m compileall -q engine tests scripts`) also passed in the same GitHub Actions run. A fresh `git diff --check` was not part of that workflow run.
 
 ### Real build and validation evidence
 
@@ -166,16 +180,15 @@ These limitations do not invalidate the tested initial libpng pilot controls, bu
 
 The implementation covers the Phase 2 pilot workflow: strict adapter configuration, authenticated source/build provenance, native build orchestration, harness smoke/coverage validation, bounded campaign storage, controlled process lifecycle and non-destructive failed-build recovery. This does not mean KEKKAI's later roadmap capabilities are complete. Source intelligence, broader target adapters, advanced multi-worker fuzzing, persistent mode, differential version analysis, SQLite-backed crash intelligence, dashboard and optional AI remain later phases.
 
-## 10. Local working-tree hygiene
+## 10. Repository hygiene
 
-The current working tree also contains three untracked one-time patch scripts (`apply_kekkai_f07_f08.py`, `apply_kekkai_f07_f08_hardening.py` and `apply_kekkai_f08_manifest_race.py`) and a timestamped `.kekkai-f07-f08-backup-*` directory. They are development/rollback artifacts, not KEKKAI runtime components. Keep the backup outside the repository if it is still needed, and exclude the patch scripts and backup directory from any project commit. The generated `scripts/__pycache__/` content is covered by the existing `__pycache__/` ignore rule.
-
-Before any commit, review and stage only intended project files. Do not use `git add .` while these local artifacts remain in the repository.
+One-time patch scripts and rollback support files are development artifacts, not KEKKAI runtime components. They must remain outside the repository and must not be added to project commits. The remediation commits contain only the reviewed source, tests, CI workflow and documentation changes.
 
 ## 11. Change-control state
 
-- All implementation changes remain uncommitted on `fix/phase2-security-remediation`.
+- Remediation code and tests are committed and pushed on `fix/phase2-security-remediation`.
+- Current code/test commit before this documentation closeout: `620c36f5d575c9f564917288e34da5a5c16bd79d`.
 - No changes were made to `main`, `development` or the original feature branch.
-- No commit, push or merge was performed.
-- No new fuzzing campaign was started.
-- The current review found `git diff --check` clean; a final status/diff review is still required after the report and any documentation updates are applied.
+- No merge was performed and no Phase 3 implementation work was started.
+- No new fuzzing campaign was launched.
+- Independent auditor final confirmation and remaining local environment checks are still required before Phase 2 sign-off.

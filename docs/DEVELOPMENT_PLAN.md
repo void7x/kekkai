@@ -98,17 +98,15 @@ The first live orchestrator launch failed before fuzzing because the configured 
 
 **Phase 2 is complete for the libpng 1.6.59 adapter.** The clean build, four validation gates, live campaign and retained-corpus sanitizer replay passed. See the Phase 2 verification report for evidence and limitations.
 
-## Security remediation verification - 2026-11-12 to 2026-11-16
+## Security remediation verification - 2026-11-12 to 2026-11-18
 
-A follow-up security remediation was implemented on the local
-`fix/phase2-security-remediation` branch. The work strengthens the initial
-libpng 1.6.59 pilot without expanding Phase 2 into the later roadmap phases.
+A follow-up security remediation was implemented and pushed to
+`fix/phase2-security-remediation`. The work strengthens the initial libpng
+1.6.59 pilot without expanding Phase 2 into the later roadmap phases.
 
 ### Latest recorded verification
 
-- Full automated test suite: **143 tests passed, 0 failures, 0 errors**
-  (5.868 seconds).
-- `git diff --check`: passed during the latest working-tree review.
+- GitHub Actions run [#44253310644](https://github.com/void7x/kekkai/actions/runs/44253310644): Python compilation passed and **166 tests passed, 0 failures, 0 errors** (5.767 seconds).
 - Authenticated libpng 1.6.59 clean build completed.
 - Build provenance verification passed, including archive identity,
   extracted source-tree identity, build configuration and artifact hashes.
@@ -173,9 +171,10 @@ not claim that future KEKKAI capabilities such as crash intelligence,
 cross-version comparison, source intelligence, dashboard or AI assistance
 are implemented.
 
-The remediation remains local to `fix/phase2-security-remediation`. It has
-not been committed, pushed or merged into `development` or `main`. No new
-live fuzzing campaign was started during this remediation.
+The remediation is committed and pushed to `fix/phase2-security-remediation`.
+It has not been merged into `development` or `main`. The independent auditor's
+final confirmation and remaining local environment checks are still pending.
+No new live fuzzing campaign was started during this remediation.
 
 See [Phase 2 Security Remediation Verification](tasks/PHASE2_SECURITY_REMEDIATION.md)
 for finding-by-finding status, evidence and limitations.
