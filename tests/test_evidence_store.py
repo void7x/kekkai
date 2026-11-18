@@ -145,6 +145,23 @@ class EvidenceStoreTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(set(report.stale_staging), {"unexpected.tmp", "foreign-link"})
 
+    def test_verifier_flags_registered_digest_copied_to_wrong_shard(self):
+        artifact = self.store.publish_bytes(b"misplaced copy")
+        self.register(artifact)
+        wrong_first = "ff" if artifact.sha256[:2] != "ff" else "fe"
+        wrong_second = "ff" if artifact.sha256[2:4] != "ff" else "fe"
+        first_dir = self.root / "objects/sha256" / wrong_first
+        first_dir.mkdir(mode=0o700)
+        second_dir = first_dir / wrong_second
+        second_dir.mkdir(mode=0o700)
+        misplaced = second_dir / (artifact.sha256 + ".bin")
+        misplaced.write_bytes(artifact.path.read_bytes())
+        misplaced.chmod(0o400)
+        report = self.store.verify_evidence_store(self.connection)
+        self.assertIn(
+            f"{wrong_first}/{wrong_second}/{artifact.sha256}.bin",
+            report.unreferenced,
+        )
     def test_verifier_rejects_invalid_shard_names_and_permissions(self):
         invalid_name = self.root / "objects/sha256/ZZ"
         invalid_name.mkdir(mode=0o700)
