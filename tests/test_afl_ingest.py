@@ -375,7 +375,7 @@ class AflIngestIntegrationTests(unittest.TestCase):
         ).encode("utf-8")
         (self.campaign_dir / "campaign.json").write_bytes(self.campaign_metadata_raw)
 
-    def _ingest(self):
+    def _ingest(self, evidence_root=None):
         with (
             patch("os.geteuid", return_value=1000),
             patch("engine.evidence.afl_ingest.load_adapter_config", return_value=self.config),
@@ -391,7 +391,7 @@ class AflIngestIntegrationTests(unittest.TestCase):
             return ingest_afl_campaign(
                 self.campaign_dir,
                 self.config_path,
-                self.evidence_root,
+                self.evidence_root if evidence_root is None else evidence_root,
             )
 
     def test_imports_crashes_and_hangs_into_linked_immutable_records(self):
@@ -457,6 +457,14 @@ class AflIngestIntegrationTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT count(*) FROM artifacts").fetchone(), (2,))
         finally:
             connection.close()
+
+    def test_evidence_root_inside_checkout_is_refused_before_creation(self):
+        project_root = Path(__file__).resolve().parents[1]
+        protected_root = project_root / ".p3-02-evidence-root-must-not-exist"
+        self.assertFalse(protected_root.exists())
+        with self.assertRaisesRegex(AflIngestError, "overlaps a protected path"):
+            self._ingest(protected_root)
+        self.assertFalse(protected_root.exists())
 
     def test_invalid_signal_is_rejected_before_evidence_store_creation(self):
         original = next(iter(self.crash_dir.iterdir()))
