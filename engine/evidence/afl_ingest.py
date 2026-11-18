@@ -704,11 +704,12 @@ def _validate_campaign(
         campaign_info = os.fstat(campaign_fd)
         if stat.S_IMODE(campaign_info.st_mode) & 0o077:
             raise AflIngestError("Campaign directory must not be accessible by group or other users.")
+        storage_device = campaign_info.st_dev
         raw_metadata, metadata_snapshot = _read_file_at(
             campaign_fd,
             "campaign.json",
             maximum=MAX_CAMPAIGN_METADATA_BYTES,
-            expected_device=storage_device := campaign_info.st_dev,
+            expected_device=storage_device,
         )
     finally:
         os.close(campaign_fd)
@@ -787,7 +788,9 @@ def _validate_campaign(
         build_raw_path = Path(build_metadata_path)
         build_fd = _open_directory(build_raw_path.parent)
         try:
-            build_raw, _ = _read_file_at(build_fd, build_raw_path.name, maximum=MAX_CAMPAIGN_METADATA_BYTES)
+            build_raw, build_metadata_snapshot = _read_file_at(
+                build_fd, build_raw_path.name, maximum=MAX_CAMPAIGN_METADATA_BYTES
+            )
         finally:
             os.close(build_fd)
     except (OSError, SeedManifestError) as exc:
@@ -800,11 +803,13 @@ def _validate_campaign(
         toolchain_values[key] = _require_string(toolchain, key, "toolchain")
     if toolchain_values["afl_showmap_version"] != config.fuzzer.expected_version:
         raise AflIngestError("Campaign coverage tool version differs from the pinned AFL++ version.")
-    if validation.get("build_provenance", {}).get("status") != "passed":
+    build_validation = validation.get("build_provenance")
+    coverage_validation = validation.get("coverage")
+    if not isinstance(build_validation, dict) or build_validation.get("status") != "passed":
         raise AflIngestError("Campaign did not record successful build provenance.")
-    if validation.get("coverage", {}).get("status") != "passed":
+    if not isinstance(coverage_validation, dict) or coverage_validation.get("status") != "passed":
         raise AflIngestError("Campaign did not record successful coverage validation.")
-    if validation["coverage"].get("tool_version") != toolchain_values["afl_showmap_version"]:
+    if coverage_validation.get("tool_version") != toolchain_values["afl_showmap_version"]:
         raise AflIngestError("Structured afl-showmap version does not match campaign validation evidence.")
     if any(
         not isinstance(validation.get(key), dict)
@@ -823,7 +828,7 @@ def _validate_campaign(
     command, afl_max_generated_bytes = _validate_command(metadata, config, afl_output_dir)
     if command[0] != _require_string(fuzzer, "executable", "fuzzer"):
         raise AflIngestError("Recorded command executable differs from campaign fuzzer metadata.")
-    expected_device = campaign_info.st_dev if "campaign_info" in locals() else storage_device
+    expected_device = storage_device
     worker_root, worker_name, worker_device = _detect_worker_root(afl_output_dir, expected_device)
     worker_fd = _open_directory(worker_root, expected_device=worker_device)
     try:
