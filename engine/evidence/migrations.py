@@ -198,6 +198,13 @@ def run_migrations(evidence_root: str | Path) -> int:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         raise MigrationError("Refusing evidence migrations as root.")
     root = Path(evidence_root).expanduser().absolute()
+    project_root = Path(__file__).resolve().parents[2]
+    if (
+        root == project_root
+        or root in project_root.parents
+        or project_root in root.parents
+    ):
+        raise MigrationError("Evidence store must be outside the repository checkout.")
     db_path = root / "db" / "kekkai.db"
     lock_path = root / "evidence.lock"
     backups_dir = root / "backups"
@@ -206,6 +213,11 @@ def run_migrations(evidence_root: str | Path) -> int:
     try:
         connection = open_database(db_path)
         try:
+            # Verify every known migration file, including already-applied ones.
+            # This detects accidental edits to historical SQL after deployment.
+            loaded_migrations = {
+                item.version: _load_migration(item) for item in MIGRATIONS
+            }
             quick = connection.execute("PRAGMA quick_check").fetchall()
             if quick != [("ok",)]:
                 raise MigrationError(f"Evidence database quick_check failed: {quick!r}")
@@ -241,7 +253,7 @@ def run_migrations(evidence_root: str | Path) -> int:
             if current and pending:
                 _atomic_backup(connection, backups_dir)
             for migration in pending:
-                digest, statements = _load_migration(migration)
+                digest, statements = loaded_migrations[migration.version]
                 try:
                     with immediate_transaction(connection):
                         for statement in statements:

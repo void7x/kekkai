@@ -93,6 +93,23 @@ class EvidenceMigrationTests(unittest.TestCase):
             with self.assertRaises(MigrationError):
                 run_migrations(self.root)
 
+    def test_applied_migration_file_drift_fails_closed(self):
+        with patch("os.geteuid", return_value=1000):
+            self.assertEqual(run_migrations(self.root), 1)
+        changed_sql = Path(self.temp.name) / "001_changed.sql"
+        changed_sql.write_text("CREATE TABLE edited_after_apply(value INTEGER);\n", encoding="utf-8")
+        changed = Migration(
+            1,
+            migrations.MIGRATIONS[0].name,
+            changed_sql,
+            migrations.MIGRATIONS[0].checksum_sha256,
+        )
+        with patch("os.geteuid", return_value=1000), patch.object(
+            migrations, "MIGRATIONS", (changed,)
+        ):
+            with self.assertRaisesRegex(MigrationError, "checksum mismatch"):
+                run_migrations(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
