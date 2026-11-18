@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from engine.evidence import EvidenceRepository, EvidenceStore
+from engine.evidence.repository import EvidenceConflictError
 from engine.evidence.migrations import run_migrations
 
 TS = "2026-11-18T10:20:30.000000Z"
@@ -132,6 +133,115 @@ class EvidenceSchemaTests(unittest.TestCase):
         }
         record.update(overrides)
         return record
+
+    def test_later_registration_timestamps_are_idempotent(self):
+        later = "2026-11-18T10:20:31.000000Z"
+        self.assertEqual(
+            self.repo.insert_target({"name": "libpng", "created_at": later}),
+            self.target_id,
+        )
+        self.assertEqual(
+            self.repo.insert_target_version({
+                "target_id": self.target_id,
+                "version": "1.6.59",
+                "source_archive_sha256": "a" * 64,
+                "source_tree_sha256": "b" * 64,
+                "source_dir_recorded": "/work/libpng-1.6.59",
+                "created_at": later,
+            }),
+            self.version_id,
+        )
+        self.assertEqual(self.repo.insert_build(self.build_record(recorded_at=later)), self.build_id)
+        self.assertEqual(self.repo.insert_campaign(self.campaign_record(recorded_at=later)), self.campaign_id)
+        artifact_row = self.connection.execute(
+            "SELECT sha256, size_bytes, storage_relpath FROM artifacts WHERE id=?",
+            (self.artifact_id,),
+        ).fetchone()
+        self.assertEqual(
+            self.repo.insert_artifact({
+                "sha256": artifact_row[0],
+                "size_bytes": artifact_row[1],
+                "storage_relpath": artifact_row[2],
+                "first_ingested_at": later,
+                "last_verified_at": later,
+            }),
+            self.artifact_id,
+        )
+        original_observation_id = self.repo.insert_observation(self.observation_record())
+        self.assertEqual(
+            self.repo.insert_observation(self.observation_record(ingested_at=later)),
+            original_observation_id,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT created_at FROM targets WHERE id=?", (self.target_id,)).fetchone()[0],
+            TS,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT created_at FROM target_versions WHERE id=?", (self.version_id,)).fetchone()[0],
+            TS,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT recorded_at FROM builds WHERE id=?", (self.build_id,)).fetchone()[0],
+            TS,
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT recorded_at FROM campaigns WHERE id=?", (self.campaign_id,)).fetchone()[0],
+            TS,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT first_ingested_at, last_verified_at FROM artifacts WHERE id=?",
+                (self.artifact_id,),
+            ).fetchone(),
+            (TS, later),
+        )
+        self.assertEqual(
+            self.connection.execute("SELECT ingested_at FROM observations WHERE id=?", (original_observation_id,)).fetchone()[0],
+            TS,
+        )
+
+    def test_campaign_all_unique_identities_are_checked(self):
+        with self.assertRaises(EvidenceConflictError):
+            self.repo.insert_campaign(self.campaign_record(
+                campaign_uid="campaign-20261118T102031Z-" + "d" * 12,
+                campaign_dir="/work/campaign-storage/" + self.campaign_uid,
+                afl_output_dir="/work/campaign-storage/other/afl-output",
+            ))
+        with self.assertRaises(EvidenceConflictError):
+            self.repo.insert_campaign(self.campaign_record(
+                campaign_uid="campaign-20261118T102032Z-" + "e" * 12,
+                campaign_dir="/work/campaign-storage/other",
+                afl_output_dir="/work/campaign-storage/" + self.campaign_uid + "/afl-output",
+            ))
+
+    def test_repository_rejects_nul_strings_and_boolean_integer_values(self):
+        with self.assertRaises(ValueError):
+            self.repo.insert_target({"name": "bad\x00target", "created_at": TS})
+        with self.assertRaises(ValueError):
+            self.repo.insert_campaign(self.campaign_record(seed_count=True))
+        artifact_row = self.connection.execute(
+            "SELECT sha256, storage_relpath FROM artifacts WHERE id=?", (self.artifact_id,)
+        ).fetchone()
+        with self.assertRaises(ValueError):
+            self.repo.insert_artifact({
+                "sha256": artifact_row[0],
+                "size_bytes": True,
+                "storage_relpath": artifact_row[1],
+                "first_ingested_at": TS,
+                "last_verified_at": TS,
+            })
+
+    def test_sql_schema_rejects_embedded_nul_text(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.connection.execute(
+                "INSERT INTO targets(name, created_at) VALUES(?, ?)",
+                ("bad\x00target", TS),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.connection.execute(
+                "INSERT INTO schema_migrations(version, name, checksum_sha256, applied_at) VALUES(2, ?, ?, ?)",
+                ("safe_name\x00../../evil", "a" * 64, TS),
+            )
 
     def test_actual_campaign_uid_format_is_accepted(self):
         self.assertEqual(len(self.campaign_uid), 38)
