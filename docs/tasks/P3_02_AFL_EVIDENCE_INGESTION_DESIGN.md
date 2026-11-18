@@ -73,7 +73,8 @@ The service must validate the complete campaign before the first write:
 
 3. **Build and target provenance**
    - Validate the current schema-v2 `build.json`, its campaign-captured hash, terminal completed state, target/version/profile/build-directory identity and recorded build-step structure.
-   - Re-hash the six recorded build outputs and require them to match `build.json`; verify the pinned source archive/tree identity and harness identity using the existing provenance rules.
+   - Re-hash the six recorded build outputs and require them to match `build.json`; verify the pinned source archive/tree identity and harness identity against their recorded hashes and fixed build contract.
+   - Do not re-run compiler or AFL++ version probes during historical import. Use the exact campaign-time version facts preserved in the successful provenance report inside `campaign.json`; refuse the import if required facts are absent or malformed.
    - Populate target, target-version and build records only from these verified records. Never infer a missing compiler version or substitute the currently installed version for a campaign-time version.
    - Populate campaign metadata only from the campaign JSON, its captured identity, the exact command and any validated AFL++ statistics.
 
