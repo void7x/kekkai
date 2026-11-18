@@ -61,7 +61,7 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_migration_failure_rolls_back_ddl_and_creates_backup(self):
         with patch("os.geteuid", return_value=1000):
-            run_migrations(self.root)
+            run_migrations(self.root, min_free_reserve_bytes=0)
         sql_path = Path(self.temp.name) / "002_failure.sql"
         sql = "CREATE TABLE migration_probe(value INTEGER);\nINSERT INTO missing_table VALUES (1);\n"
         sql_path.write_text(sql, encoding="utf-8")
@@ -70,7 +70,7 @@ class EvidenceMigrationTests(unittest.TestCase):
             migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)
         ):
             with self.assertRaises(MigrationError):
-                run_migrations(self.root)
+                run_migrations(self.root, min_free_reserve_bytes=0)
         connection = sqlite3.connect(self.store.database_path)
         try:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (1,))
@@ -131,7 +131,7 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_backup_failure_cleans_sidecar_temporary_and_unpublished_backup(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root), 1)
+            self.assertEqual(run_migrations(self.root, min_free_reserve_bytes=0), 1)
         sql_path = Path(self.temp.name) / "002_sidecar.sql"
         sql = "CREATE TABLE sidecar_probe(value INTEGER);\n"
         sql_path.write_text(sql, encoding="utf-8")
@@ -140,7 +140,7 @@ class EvidenceMigrationTests(unittest.TestCase):
             "engine.evidence.migrations.os.write", side_effect=OSError("simulated sidecar write failure")
         ), patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)):
             with self.assertRaisesRegex(MigrationError, "Pre-migration backup failed"):
-                run_migrations(self.root)
+                run_migrations(self.root, min_free_reserve_bytes=0)
         backups = self.root / "backups"
         self.assertEqual(list(backups.glob(".sidecar-*.tmp")), [])
         self.assertEqual(list(backups.glob(".backup-*.tmp")), [])
