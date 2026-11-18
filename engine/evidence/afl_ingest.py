@@ -899,7 +899,12 @@ def _validate_campaign(
         candidates=candidates,
         total_bytes=total_bytes,
     )
-    return context, (str(config.target.source_dir), str(config.build.build_dir), str(config.target.output_parent))
+    return context, (
+        str(project_root),
+        str(config.target.source_dir),
+        str(config.build.build_dir),
+        str(config.target.output_parent),
+    )
 
 
 def _directory_identity(path: Path, expected_device: int) -> tuple[int, int, int, int, int]:
