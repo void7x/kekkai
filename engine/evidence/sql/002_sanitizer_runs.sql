@@ -172,7 +172,7 @@ CREATE TABLE sanitizer_runs (
     ),
     CHECK (
         (stdout_publication_state = 'not_started'
-            AND stdout_capture_state = 'not_started' AND stdout_truncated = 0)
+            AND stdout_capture_state IN ('not_started', 'read_failed') AND stdout_artifact_id IS NULL)
         OR (stdout_publication_state = 'published'
             AND stdout_capture_state IN ('complete', 'read_failed'))
         OR (stdout_publication_state = 'pending_recovery'
@@ -180,7 +180,7 @@ CREATE TABLE sanitizer_runs (
     ),
     CHECK (
         (stderr_publication_state = 'not_started'
-            AND stderr_capture_state = 'not_started' AND stderr_truncated = 0)
+            AND stderr_capture_state IN ('not_started', 'read_failed') AND stderr_artifact_id IS NULL)
         OR (stderr_publication_state = 'published'
             AND stderr_capture_state IN ('complete', 'read_failed'))
         OR (stderr_publication_state = 'pending_recovery'
