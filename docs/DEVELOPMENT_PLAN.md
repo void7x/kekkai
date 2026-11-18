@@ -106,13 +106,13 @@ A follow-up security remediation was implemented and pushed to
 
 ### Latest recorded verification
 
-- GitHub Actions run [#44253310644](https://github.com/void7x/kekkai/actions/runs/44253310644): Python compilation passed and **166 tests passed, 0 failures, 0 errors** (5.767 seconds).
-- Authenticated libpng 1.6.59 clean build completed.
-- Build provenance verification passed, including archive identity,
-  extracted source-tree identity, build configuration and artifact hashes.
-- Preflight passed.
-- Harness smoke validation: 13/13 cases passed.
-- Coverage validation: 10 distinct seed maps; Adam7 repeatability passed.
+- GitHub Actions run [#44254082914](https://github.com/void7x/kekkai/actions/runs/44254082914), on Ubuntu 24.04 with Python 3.11: Python compilation passed and **166 tests passed, 0 failures, 0 errors** (7.155 seconds).
+- Local WSL Ubuntu 26.04.1 verification: Python 3.11.18 compiled successfully and passed 166 tests (5.912 seconds); Python 3.14.4 compiled successfully and passed 166 tests (6.805 seconds).
+- Existing authenticated libpng 1.6.59 build provenance passed: pinned archive and extracted source-tree identity, recorded build steps, six artifact hashes, CMake configuration, compiler, AFL++ and zlib versions all matched.
+- Adapter preflight passed, including source version, harness, seed corpus, dedicated storage mount and AFL++ 4.33c.
+- Campaign storage verification passed: exact ext4 UUID and loop backing image matched; image mode 0600; mounted filesystem root owned by the current user with mode 0700 and required mount options.
+- Harness smoke validation: **13/13 cases passed**.
+- AFL++ coverage validation: **10/10 seed maps passed and were distinct**; Adam7 repeatability passed on both repeated runs (552 tuples and identical map hashes).
 - No new live AFL++ campaign was launched during this remediation.
 
 ### Security and reliability remediation
@@ -165,16 +165,24 @@ A follow-up security remediation was implemented and pushed to
   host process.
 - An orchestrator killed with SIGKILL cannot execute its own cleanup handler.
 
-**Assessment:** Functionally complete for the initial libpng 1.6.59 pilot,
-subject to the limitations above and final local closeout checks. This does
+**Final closeout assessment (2026-11-18):** The independent read-only audit
+of implementation commit `a55326e0a58680895ce82de5b0b2b3056f8f1669`
+returned **APPROVED WITH ACCEPTED LIMITATIONS**. The auditor identified no
+blocking defects. P2-006, P2-008 and P2-009 retain specific non-blocking
+follow-up items; these are recorded in the Phase 2 security remediation report
+and must not be described as fully resolved. The auditor independently
+compiled the Python sources and passed all 166 tests.
+
+The remaining limitations above remain part of the accepted Phase 2
+assessment. This closeout applies to the initial libpng 1.6.59 pilot; it does
 not claim that future KEKKAI capabilities such as crash intelligence,
 cross-version comparison, source intelligence, dashboard or AI assistance
 are implemented.
 
-The remediation is committed and pushed to `fix/phase2-security-remediation`.
-It has not been merged into `development` or `main`. The independent auditor's
-final confirmation and remaining local environment checks are still pending.
-No new live fuzzing campaign was started during this remediation.
+The owner has approved documentation closeout and preparation for integration.
+The remediation branch is being proposed to `development` for review; it has
+not been merged into `development` or `main`. No new live fuzzing campaign
+was started during this remediation. Phase 3 implementation remains separate.
 
 See [Phase 2 Security Remediation Verification](tasks/PHASE2_SECURITY_REMEDIATION.md)
 for finding-by-finding status, evidence and limitations.
