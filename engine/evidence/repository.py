@@ -340,25 +340,22 @@ class EvidenceRepository:
         ).fetchone()
         if row is None:
             return None
-        names = tuple(column[0] for column in self.connection.execute(
-            """
-            SELECT
-                'observation_id', 'observation_uid', 'target_id', 'target_version_id',
-                'source_build_id', 'campaign_id', 'original_artifact_id', 'observation_kind',
-                'campaign_uid', 'campaign_dir', 'afl_output_dir', 'max_input_bytes',
-                'source_build_role', 'source_build_status', 'source_build_profile',
-                'source_build_dir', 'source_build_metadata_sha256',
-                'diagnostic_build_role', 'diagnostic_build_status', 'diagnostic_build_profile',
-                'diagnostic_build_dir', 'diagnostic_build_metadata_sha256',
-                'diagnostic_harness_source_path', 'diagnostic_harness_binary_path',
-                'diagnostic_harness_source_sha256', 'diagnostic_harness_binary_sha256',
-                'diagnostic_library_archive_sha256', 'diagnostic_compiler_path',
-                'diagnostic_compiler_version', 'diagnostic_sanitizer_config_json',
-                'diagnostic_environment_json', 'target_version', 'source_archive_sha256',
-                'source_tree_sha256', 'original_artifact_sha256', 'original_artifact_size',
-                'original_artifact_relpath'
-            """
-        ))
+        names = (
+            "observation_id", "observation_uid", "target_id", "target_version_id",
+            "source_build_id", "campaign_id", "original_artifact_id", "observation_kind",
+            "campaign_uid", "campaign_dir", "afl_output_dir", "max_input_bytes",
+            "source_build_role", "source_build_status", "source_build_profile",
+            "source_build_dir", "source_build_metadata_sha256",
+            "diagnostic_build_role", "diagnostic_build_status", "diagnostic_build_profile",
+            "diagnostic_build_dir", "diagnostic_build_metadata_sha256",
+            "diagnostic_harness_source_path", "diagnostic_harness_binary_path",
+            "diagnostic_harness_source_sha256", "diagnostic_harness_binary_sha256",
+            "diagnostic_library_archive_sha256", "diagnostic_compiler_path",
+            "diagnostic_compiler_version", "diagnostic_sanitizer_config_json",
+            "diagnostic_environment_json", "target_version", "source_archive_sha256",
+            "source_tree_sha256", "original_artifact_sha256", "original_artifact_size",
+            "original_artifact_relpath",
+        )
         return dict(zip(names, row))
 
     def insert_sanitizer_run(self, record: Mapping[str, object]) -> int:
