@@ -87,6 +87,65 @@ class EvidenceMigrationTests(unittest.TestCase):
         actual = hashlib.sha256(backups[0].read_bytes()).hexdigest()
         self.assertTrue(sidecar.read_text().startswith(actual + "  "))
 
+    def test_symlinked_evidence_root_is_rejected_before_lock_creation(self):
+        actual = Path(self.temp.name) / "real-evidence"
+        actual.mkdir(mode=0o700)
+        alias = Path(self.temp.name) / "linked-evidence"
+        alias.symlink_to(actual, target_is_directory=True)
+        with patch("os.geteuid", return_value=1000):
+            with self.assertRaises(MigrationError):
+                run_migrations(alias)
+        self.assertFalse((actual / "evidence.lock").exists())
+
+    def test_empty_existing_migration_history_is_rejected(self):
+        with patch("os.geteuid", return_value=1000):
+            self.assertEqual(run_migrations(self.root), 1)
+        connection = sqlite3.connect(self.store.database_path, isolation_level=None)
+        try:
+            connection.execute("DELETE FROM schema_migrations")
+        finally:
+            connection.close()
+        with patch("os.geteuid", return_value=1000):
+            with self.assertRaisesRegex(MigrationError, "exists but is empty"):
+                run_migrations(self.root)
+
+    def test_backup_capacity_is_checked_before_online_backup(self):
+        with patch("os.geteuid", return_value=1000):
+            self.assertEqual(run_migrations(self.root), 1)
+        sql_path = Path(self.temp.name) / "002_capacity.sql"
+        sql = "CREATE TABLE capacity_probe(value INTEGER);\n"
+        sql_path.write_text(sql, encoding="utf-8")
+        migration = Migration(2, "002_capacity", sql_path, hashlib.sha256(sql.encode()).hexdigest())
+
+        class LowCapacity:
+            f_bavail = 1
+            f_frsize = 4096
+            f_favail = 1
+
+        with patch("os.geteuid", return_value=1000), patch(
+            "engine.evidence.migrations.os.fstatvfs", return_value=LowCapacity()
+        ), patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)):
+            with self.assertRaisesRegex(MigrationError, "Insufficient free space"):
+                run_migrations(self.root)
+        self.assertEqual(list((self.root / "backups").glob("kekkai-pre-migration-*.db")), [])
+
+    def test_backup_failure_cleans_sidecar_temporary_and_unpublished_backup(self):
+        with patch("os.geteuid", return_value=1000):
+            self.assertEqual(run_migrations(self.root), 1)
+        sql_path = Path(self.temp.name) / "002_sidecar.sql"
+        sql = "CREATE TABLE sidecar_probe(value INTEGER);\n"
+        sql_path.write_text(sql, encoding="utf-8")
+        migration = Migration(2, "002_sidecar", sql_path, hashlib.sha256(sql.encode()).hexdigest())
+        with patch("os.geteuid", return_value=1000), patch(
+            "engine.evidence.migrations.os.write", side_effect=OSError("simulated sidecar write failure")
+        ), patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)):
+            with self.assertRaisesRegex(MigrationError, "Pre-migration backup failed"):
+                run_migrations(self.root)
+        backups = self.root / "backups"
+        self.assertEqual(list(backups.glob(".sidecar-*.tmp")), [])
+        self.assertEqual(list(backups.glob(".backup-*.tmp")), [])
+        self.assertEqual(list(backups.glob("kekkai-pre-migration-*.db")), [])
+
     def test_checksum_mismatch_fails_before_migration(self):
         wrong = Migration(1, "001_initial_evidence_schema", migrations.MIGRATIONS[0].path, "0" * 64)
         with patch("os.geteuid", return_value=1000), patch.object(migrations, "MIGRATIONS", (wrong,)):
