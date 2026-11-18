@@ -55,6 +55,14 @@ _TIMESTAMP_COLUMNS = {
     "last_verified_at", "source_file_mtime_utc", "ingested_at",
 }
 _JSON_COLUMNS = {"sanitizer_config_json", "environment_json", "command_json"}
+_INTEGER_COLUMNS = {
+    "target_id", "target_version_id", "build_id", "campaign_id", "original_artifact_id",
+    "afl_instrumented_locations", "seed_count", "duration_seconds", "memory_mib",
+    "timeout_ms", "effective_timeout_ms", "max_input_bytes", "afl_max_generated_bytes",
+    "exit_code", "total_execs", "saved_crashes_reported", "saved_hangs_reported",
+    "size_bytes", "observed_signal", "observed_exit_code", "afl_discovery_time_ms",
+    "afl_discovery_execs",
+}
 _OPTIONAL_COLUMNS = {
     "description", "source_archive_path", "harness_source_sha256", "harness_binary_sha256",
     "library_archive_sha256", "cmake_cache_sha256", "compile_database_sha256",
@@ -107,6 +115,10 @@ class EvidenceRepository:
         normalized: dict[str, object] = {}
         for column in columns:
             value = record.get(column)
+            if isinstance(value, str) and "\x00" in value:
+                raise ValueError(f"{column} must not contain NUL bytes.")
+            if column in _INTEGER_COLUMNS and value is not None and type(value) is not int:
+                raise ValueError(f"{column} must be an integer (booleans are not accepted).")
             if column in _TIMESTAMP_COLUMNS and value is not None:
                 value = normalize_utc_timestamp(str(value), column)
             elif column in _JSON_COLUMNS and value is not None:
@@ -125,6 +137,7 @@ class EvidenceRepository:
         columns: tuple[str, ...],
         record: Mapping[str, object],
         unique_keys: tuple[tuple[str, ...], ...],
+        ignored_on_conflict: tuple[str, ...] = (),
     ) -> int:
         values = self._normalize_record(columns, record)
         column_sql = ", ".join(columns)
@@ -143,9 +156,11 @@ class EvidenceRepository:
                 raise EvidenceConflictError(f"Conflicting unique identities in {table}.")
             if existing_rows:
                 row = next(iter(existing_rows.values()))
-                existing_values = tuple(row[index + 1] for index in range(len(columns)))
-                supplied_values = tuple(values[column] for column in columns)
-                if existing_values != supplied_values:
+                differing_columns = tuple(
+                    column for index, column in enumerate(columns)
+                    if column not in ignored_on_conflict and row[index + 1] != values[column]
+                )
+                if differing_columns:
                     raise EvidenceConflictError(
                         f"Existing {table} identity has different immutable facts."
                     )
@@ -157,23 +172,30 @@ class EvidenceRepository:
             return int(cursor.lastrowid)
 
     def insert_target(self, record: Mapping[str, object]) -> int:
-        return self._insert_immutable("targets", TARGET_COLUMNS, record, (("name",),))
+        return self._insert_immutable(
+            "targets", TARGET_COLUMNS, record, (("name",),),
+            ignored_on_conflict=("created_at",),
+        )
 
     def insert_target_version(self, record: Mapping[str, object]) -> int:
         return self._insert_immutable(
             "target_versions", TARGET_VERSION_COLUMNS, record,
             (("target_id", "version", "source_tree_sha256"),),
+            ignored_on_conflict=("created_at",),
         )
 
     def insert_build(self, record: Mapping[str, object]) -> int:
         return self._insert_immutable(
             "builds", BUILD_COLUMNS, record,
             (("build_dir", "build_metadata_sha256"),),
+            ignored_on_conflict=("recorded_at",),
         )
 
     def insert_campaign(self, record: Mapping[str, object]) -> int:
         return self._insert_immutable(
-            "campaigns", CAMPAIGN_COLUMNS, record, (("campaign_uid",),),
+            "campaigns", CAMPAIGN_COLUMNS, record,
+            (("campaign_uid",), ("campaign_dir",), ("afl_output_dir",)),
+            ignored_on_conflict=("recorded_at",),
         )
 
     def insert_artifact(self, record: Mapping[str, object]) -> int:
@@ -185,8 +207,8 @@ class EvidenceRepository:
                 (values["sha256"],),
             ).fetchone()
             if row is not None:
-                expected = (values["size_bytes"], values["storage_relpath"], values["first_ingested_at"])
-                actual = (row[1], row[2], row[3])
+                expected = (values["size_bytes"], values["storage_relpath"])
+                actual = (row[1], row[2])
                 if actual != expected:
                     raise EvidenceConflictError("Existing artifact hash has conflicting size or storage identity.")
                 if values["last_verified_at"] > row[4]:
@@ -221,6 +243,7 @@ class EvidenceRepository:
                 ("observation_uid",),
                 ("campaign_id", "afl_worker_name", "observation_kind", "afl_source_filename"),
             ),
+            ignored_on_conflict=("ingested_at",),
         )
 
     def get_artifact(self, digest: str) -> dict[str, object] | None:
