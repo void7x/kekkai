@@ -262,11 +262,174 @@ class SanitizerClassificationTests(unittest.TestCase):
             input_arg = argv.index("--input-path")
             self.assertEqual(argv[harness_arg + 1], "/run/kekkai-p3-03-test/kekkai_png_harness")
             self.assertEqual(argv[input_arg + 1], "/run/kekkai-p3-03-test/input.bin")
-            self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, b"\\x01")
-            self.assertEqual(GUARD_AUTHORIZATION_TOKEN, b"\\x01")
+            self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, b"\x01")
+            self.assertEqual(GUARD_AUTHORIZATION_TOKEN, b"\x01")
 
 
 class SanitizerMigrationTests(unittest.TestCase):
+    @staticmethod
+    def _insert_parent_evidence(connection, root: Path) -> tuple[EvidenceRepository, dict[str, int]]:
+        repo = EvidenceRepository(connection)
+        timestamp = "2026-11-19T10:00:00.000000Z"
+        target_id = repo.insert_target({
+            "name": "libpng", "description": "P3 test target", "created_at": timestamp,
+        })
+        version_id = repo.insert_target_version({
+            "target_id": target_id,
+            "version": "1.6.59",
+            "source_archive_sha256": "a" * 64,
+            "source_tree_sha256": "b" * 64,
+            "source_dir_recorded": str(root / "source"),
+            "source_archive_path": str(root / "libpng.tar.xz"),
+            "created_at": timestamp,
+        })
+
+        build_ids = {}
+        for index, role in enumerate(("fuzz", "diagnostic_replay"), start=1):
+            label = str(index)
+            build_ids[role] = repo.insert_build({
+                "target_id": target_id,
+                "target_version_id": version_id,
+                "profile": "afl-clang-fast" if role == "fuzz" else "libpng-asan-ubsan",
+                "build_role": role,
+                "build_dir": str(root / f"build-{role}"),
+                "build_metadata_sha256": label * 64,
+                "harness_source_path": str(root / "harness.c"),
+                "harness_binary_path": str(root / f"harness-{role}"),
+                "harness_source_sha256": "c" * 64,
+                "harness_binary_sha256": ("d" if role == "fuzz" else "e") * 64,
+                "library_archive_sha256": "f" * 64,
+                "cmake_cache_sha256": "1" * 64,
+                "compile_database_sha256": "2" * 64,
+                "generated_header_sha256": "3" * 64,
+                "compiler_path": "/usr/bin/clang",
+                "compiler_version": "test compiler version",
+                "cmake_build_type": "RelWithDebInfo",
+                "aflpp_version": "4.33c" if role == "fuzz" else None,
+                "afl_instrumented_locations": 1 if role == "fuzz" else None,
+                "sanitizer_config_json": {"profile": role},
+                "environment_json": {},
+                "build_status": "completed",
+                "started_at": timestamp,
+                "ended_at": timestamp,
+                "recorded_at": timestamp,
+            })
+
+        campaign_id = repo.insert_campaign({
+            "campaign_uid": "campaign-20261119T100000Z-0123456789ab",
+            "target_id": target_id,
+            "target_version_id": version_id,
+            "build_id": build_ids["fuzz"],
+            "adapter_config_path": str(root / "adapter.json"),
+            "adapter_config_sha256": "4" * 64,
+            "campaign_dir": str(root / "campaign"),
+            "afl_output_dir": str(root / "campaign" / "out"),
+            "campaign_metadata_sha256": "5" * 64,
+            "seed_dir": str(root / "seeds"),
+            "seed_manifest_sha256": "6" * 64,
+            "seed_count": 1,
+            "fuzzer_executable": "/usr/bin/afl-fuzz",
+            "fuzzer_version": "AFL++ 4.33c",
+            "command_json": ["/usr/bin/afl-fuzz"],
+            "duration_seconds": 1,
+            "memory_mib": 512,
+            "timeout_ms": 1000,
+            "effective_timeout_ms": 1000,
+            "max_input_bytes": 8 * 1024 * 1024,
+            "afl_max_generated_bytes": 8 * 1024 * 1024,
+            "status": "completed",
+            "exit_code": 0,
+            "total_execs": 1,
+            "saved_crashes_reported": 1,
+            "saved_hangs_reported": 0,
+            "started_at": timestamp,
+            "ended_at": timestamp,
+            "recorded_at": timestamp,
+        })
+        original_sha = "7" * 64
+        artifact_id = repo.insert_artifact({
+            "sha256": original_sha,
+            "size_bytes": 1,
+            "storage_relpath": "objects/sha256/77/77/" + original_sha + ".bin",
+            "first_ingested_at": timestamp,
+            "last_verified_at": timestamp,
+        })
+        observation_id = repo.insert_observation({
+            "observation_uid": "obs-" + ("8" * 64),
+            "target_id": target_id,
+            "target_version_id": version_id,
+            "build_id": build_ids["fuzz"],
+            "campaign_id": campaign_id,
+            "original_artifact_id": artifact_id,
+            "observation_kind": "crash",
+            "afl_worker_name": "default",
+            "afl_source_filename": "id:000001,sig:06,src:000000,time:0,execs:1",
+            "afl_input_id": None,
+            "observed_signal": 11,
+            "observed_exit_code": None,
+            "afl_discovery_time_ms": 100,
+            "afl_discovery_execs": 1,
+            "source_file_mtime_utc": timestamp,
+            "ingested_at": timestamp,
+        })
+        return repo, {
+            "target_id": target_id,
+            "target_version_id": version_id,
+            "source_build_id": build_ids["fuzz"],
+            "diagnostic_build_id": build_ids["diagnostic_replay"],
+            "campaign_id": campaign_id,
+            "artifact_id": artifact_id,
+            "observation_id": observation_id,
+        }
+
+    @staticmethod
+    def _blocked_run_record(ids: dict[str, int]) -> dict[str, object]:
+        started = "2026-11-19T10:00:01.000000Z"
+        finished = "2026-11-19T10:00:02.000000Z"
+        return {
+            "run_uid": str(uuid.uuid4()),
+            "target_id": ids["target_id"],
+            "target_version_id": ids["target_version_id"],
+            "source_build_id": ids["source_build_id"],
+            "campaign_id": ids["campaign_id"],
+            "observation_id": ids["observation_id"],
+            "diagnostic_build_id": ids["diagnostic_build_id"],
+            "original_artifact_id": ids["artifact_id"],
+            "policy_id": "p3-03-test-policy",
+            "argv_json": [],
+            "environment_json": {},
+            "resource_policy_json": {},
+            "runtime_observation_json": {},
+            "attempt_started_at": started,
+            "attempt_finished_at": finished,
+            "execution_started_at": None,
+            "execution_finished_at": None,
+            "execution_status": "blocked_preflight",
+            "harness_exec_succeeded": 0,
+            "exit_code": None,
+            "signal_number": None,
+            "sanitizer_families_json": [],
+            "assessment": "inconclusive",
+            "cleanup_status": "not_required",
+            "cleanup_detail": None,
+            "recovery_path": None,
+            "systemd_unit_name": None,
+            "kernel_version": "test-kernel",
+            "wsl_version": None,
+            "systemd_version": None,
+            "stdout_artifact_id": None,
+            "stdout_capture_state": "not_started",
+            "stdout_truncated": 0,
+            "stdout_publication_state": "not_started",
+            "stdout_detail": None,
+            "stderr_artifact_id": None,
+            "stderr_capture_state": "not_started",
+            "stderr_truncated": 0,
+            "stderr_publication_state": "not_started",
+            "stderr_detail": None,
+            "recorded_at": finished,
+        }
+
     def test_fresh_database_applies_immutable_sanitizer_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "evidence"
@@ -370,6 +533,100 @@ class SanitizerMigrationTests(unittest.TestCase):
         )
         self.assertEqual(families, [])
         self.assertEqual(assessment, "inconclusive")
+
+    def test_sanitizer_table_enforces_truth_table_uuid_time_and_immutability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "evidence"
+            with EvidenceStore(root):
+                pass
+            run_migrations(root)
+            connection = open_database(root / "db" / "kekkai.db")
+            try:
+                repo, ids = self._insert_parent_evidence(connection, root)
+                record = self._blocked_run_record(ids)
+                row_id = repo.insert_sanitizer_run(record)
+
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                    connection.execute(
+                        "UPDATE sanitizer_runs SET assessment='inconclusive' WHERE id=?",
+                        (row_id,),
+                    )
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "cannot be deleted"):
+                    connection.execute("DELETE FROM sanitizer_runs WHERE id=?", (row_id,))
+
+                cases = [
+                    ("inconclusive_nonempty_families", {
+                        "sanitizer_families_json": ["address"],
+                    }),
+                    ("blocked_truncated_output", {
+                        "stdout_truncated": 1,
+                    }),
+                    ("invalid_calendar_timestamp", {
+                        "attempt_started_at": "2026-02-30T10:00:01.000000Z",
+                    }),
+                    ("invalid_clock_timestamp", {
+                        "attempt_started_at": "2026-11-19T24:00:01.000000Z",
+                    }),
+                    ("extra_uuid_hyphen", {
+                        "run_uid": "-" + str(uuid.uuid4())[1:],
+                    }),
+                ]
+                for name, changes in cases:
+                    candidate = self._blocked_run_record(ids)
+                    candidate.update(changes)
+                    values = EvidenceRepository._normalize_record(
+                        SANITIZER_RUN_COLUMNS, candidate
+                    )
+                    columns = ", ".join(SANITIZER_RUN_COLUMNS)
+                    placeholders = ", ".join("?" for _ in SANITIZER_RUN_COLUMNS)
+                    with self.subTest(name=name), self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute(
+                            f"INSERT INTO sanitizer_runs ({columns}) VALUES ({placeholders})",
+                            tuple(values[column] for column in SANITIZER_RUN_COLUMNS),
+                        )
+            finally:
+                connection.close()
+
+    def test_populated_v1_database_migrates_to_v2_without_losing_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "evidence"
+            with EvidenceStore(root):
+                pass
+            with patch("os.geteuid", return_value=1000), patch.object(
+                evidence_migrations, "MIGRATIONS", evidence_migrations.MIGRATIONS[:1]
+            ):
+                self.assertEqual(run_migrations(root), 1)
+            connection = open_database(root / "db" / "kekkai.db")
+            try:
+                self._insert_parent_evidence(connection, root)
+                before = {
+                    table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                    for table in (
+                        "targets", "target_versions", "builds", "campaigns",
+                        "artifacts", "observations",
+                    )
+                }
+            finally:
+                connection.close()
+            with patch("os.geteuid", return_value=1000):
+                self.assertEqual(run_migrations(root), 2)
+            migrated = open_database(root / "db" / "kekkai.db")
+            try:
+                self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0], 2)
+                after = {
+                    table: migrated.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                    for table in before
+                }
+                self.assertEqual(after, before)
+                self.assertEqual(migrated.execute("PRAGMA foreign_key_check").fetchall(), [])
+                self.assertEqual(
+                    migrated.execute("SELECT count(*) FROM schema_migrations").fetchone()[0],
+                    2,
+                )
+            finally:
+                migrated.close()
+            backups = list((root / "backups").glob("kekkai-pre-migration-*.db"))
+            self.assertGreaterEqual(len(backups), 1)
 
     def test_systemd_properties_parse_without_truncating_values(self):
         parsed = _parse_properties(
