@@ -726,6 +726,9 @@ def _parse_systemd_usec(value: str) -> int | None:
 
 def _verify_systemd_properties(properties: dict[str, str]) -> dict[str, Any]:
     expected = {
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "SubState": "running",
         "Type": "exec",
         "DynamicUser": "yes",
         "NoNewPrivileges": "yes",
