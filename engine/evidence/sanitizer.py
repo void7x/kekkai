@@ -564,6 +564,12 @@ def _sudo(argv: list[str], *, timeout: float = 5, capture: bool = True) -> subpr
         raise SanitizerCollectionError(f"Cannot execute privileged command {argv[0]}: {exc}") from exc
 
 
+_STAGED_PERMISSION_POLICY = {
+    "input": (0o400, 0o400),
+    "harness": (0o500, 0o500),
+    "guard": (0o444, 0o400),
+}
+
 def _staged_permissions(role: str) -> tuple[int, int]:
     """Return (root bootstrap mode, post-handoff DynamicUser mode) for a staged role."""
     try:
