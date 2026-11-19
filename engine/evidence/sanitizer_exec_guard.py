@@ -321,6 +321,8 @@ def main() -> int:
             except ProcessLookupError:
                 pass
 
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
@@ -530,6 +532,9 @@ def main() -> int:
         except OSError:
             pass
         return 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        signal.signal(signal.SIGINT, previous_sigint_handler)
 
 
 if __name__ == "__main__":
