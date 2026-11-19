@@ -30,6 +30,8 @@ from engine.evidence.sanitizer import (
     STAGING_AUTHORIZATION_TOKEN,
     MANAGER_AUTHORIZATION_TOKEN,
     SanitizerCollectionError,
+    _GuardEventChannel,
+    _deliver_manager_authorization,
     _classify_output,
     _close_process_stdin,
     _execution_outcome_unknown,
@@ -50,6 +52,41 @@ from engine.evidence.sanitizer_exec_guard import (
     verify_readonly_bind,
 )
 from engine.evidence.store import EvidenceStore
+
+
+
+class _CaptureStdout:
+    def __init__(self):
+        self.buffer = io.BytesIO()
+
+
+def _guard_frames(raw: bytes) -> list[tuple[bytes, bytes]]:
+    frames: list[tuple[bytes, bytes]] = []
+    offset = 0
+    while offset < len(raw):
+        header = raw[offset:offset + 9]
+        if len(header) != 9 or header[:4] != b"K3E1":
+            raise AssertionError("invalid guard event frame in test output")
+        kind = header[4:5]
+        size = int.from_bytes(header[5:9], "big")
+        payload = raw[offset + 9:offset + 9 + size]
+        if len(payload) != size:
+            raise AssertionError("truncated guard event frame in test output")
+        frames.append((kind, payload))
+        offset += 9 + size
+    return frames
+
+
+def _last_guard_status(raw: bytes) -> dict:
+    statuses = [json.loads(payload) for kind, payload in _guard_frames(raw) if kind == b"S"]
+    if not statuses:
+        raise AssertionError("guard emitted no status frames")
+    return statuses[-1]
+
+
+def _encode_guard_frame(kind: bytes, payload: bytes) -> bytes:
+    return b"K3E1" + kind + len(payload).to_bytes(4, "big") + payload
+
 
 
 class SanitizerProtocolRegressionTests(unittest.TestCase):
@@ -78,9 +115,91 @@ class SanitizerProtocolRegressionTests(unittest.TestCase):
             "launch_failure_confirmed": True,
         }))
         self.assertFalse(_execution_outcome_unknown(True, {
+            "guard_state": "manager_authorization_refused",
+            "manager_authorization_received": False,
+            "harness_exec_succeeded": False,
+        }))
+        self.assertFalse(_execution_outcome_unknown(True, {
             "guard_state": "harness_running",
             "harness_exec_succeeded": True,
         }))
+
+
+    def test_manager_authorization_interruption_after_pipe_acceptance_is_marked_uncertain(self):
+        accepted = []
+        possible_delivery = {"value": False}
+
+        class AcceptThenInterrupt:
+            def write(self, content):
+                accepted.append(content)
+                raise KeyboardInterrupt("signal after kernel accepted authorization")
+
+        process = SimpleNamespace(stdin=AcceptThenInterrupt())
+
+        def mark_possible_delivery():
+            possible_delivery["value"] = True
+
+        with self.assertRaises(KeyboardInterrupt):
+            _deliver_manager_authorization(process, mark_possible_delivery)
+        self.assertEqual(accepted, [MANAGER_AUTHORIZATION_TOKEN])
+        self.assertTrue(possible_delivery["value"])
+
+    def test_guard_event_channel_uses_collector_owned_status_and_stream_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            attempt = root / "attempt"
+            runtime.mkdir(mode=0o700)
+            attempt.mkdir(mode=0o700)
+
+            # These are workload-writable decoys. The collector must ignore them.
+            (runtime / "status.json").write_text(
+                json.dumps({"schema_version": 1, "guard_state": "finished", "harness_exec_succeeded": False}),
+                encoding="utf-8",
+            )
+            (runtime / "stdout.bin").write_bytes(b"forged stdout")
+            (runtime / "stderr.bin").write_bytes(b"forged stderr")
+
+            ready = {
+                "schema_version": 1,
+                "guard_state": "awaiting_manager_authorization",
+                "harness_exec_succeeded": False,
+                "manager_authorization_received": False,
+            }
+            finished = {
+                "schema_version": 1,
+                "guard_state": "finished",
+                "harness_exec_succeeded": True,
+                "execution_status": "exited",
+                "exit_code": 0,
+                "stdout": {"capture_state": "complete", "truncated": False},
+                "stderr": {"capture_state": "complete", "truncated": False},
+            }
+            frames = b"".join((
+                _encode_guard_frame(b"S", json.dumps(ready).encode()),
+                _encode_guard_frame(b"O", b"trusted stdout"),
+                _encode_guard_frame(b"E", b"trusted stderr"),
+                _encode_guard_frame(b"S", json.dumps(finished).encode()),
+            ))
+            process = SimpleNamespace(stdout=io.BytesIO(frames))
+            channel = _GuardEventChannel(attempt)
+            channel.start(process)
+            channel.join()
+
+            self.assertIsNone(process.stdout)
+            self.assertEqual(channel.snapshot()["guard_state"], "finished")
+            stdout, stdout_path, stdout_error = channel.stream_result(b"O")
+            stderr, stderr_path, stderr_error = channel.stream_result(b"E")
+            self.assertEqual(stdout, b"trusted stdout")
+            self.assertEqual(stderr, b"trusted stderr")
+            self.assertEqual(stdout_path, attempt / "stdout.bin")
+            self.assertEqual(stderr_path, attempt / "stderr.bin")
+            self.assertIsNone(stdout_error)
+            self.assertIsNone(stderr_error)
+            persisted = json.loads((attempt / "guard_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["guard_state"], "finished")
+            self.assertEqual((runtime / "stdout.bin").read_bytes(), b"forged stdout")
+            self.assertEqual((runtime / "stderr.bin").read_bytes(), b"forged stderr")
 
     def test_missing_execution_identity_does_not_accept_marker(self):
         families, assessment = _classify_output(
@@ -396,19 +515,23 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
                 "--input-path", str(input_path),
             ]
             fake_stdin = SimpleNamespace(buffer=io.BytesIO(bytes([1])))
+            fake_stdout = _CaptureStdout()
             with patch.object(sanitizer_exec_guard.sys, "argv", argv), patch.object(
                 sanitizer_exec_guard.sys, "stdin", fake_stdin
-            ), patch.dict(os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False), patch.object(
+            ), patch.object(sanitizer_exec_guard.sys, "stdout", fake_stdout), patch.dict(
+                os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False
+            ), patch.object(
                 sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
             ), patch.object(
                 sanitizer_exec_guard, "verify_readonly_bind", return_value={"read_only": "true"}
             ), patch.object(sanitizer_exec_guard.subprocess, "Popen") as popen:
                 self.assertEqual(sanitizer_exec_guard.main(), 0)
             popen.assert_not_called()
-            status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
+            status = _last_guard_status(fake_stdout.buffer.getvalue())
             self.assertEqual(status["guard_state"], "manager_authorization_refused")
             self.assertFalse(status["harness_exec_succeeded"])
             self.assertFalse(status["manager_authorization_received"])
+            self.assertFalse((runtime / "status.json").exists())
             self.assertFalse((runtime / "stdout.bin").exists())
             self.assertFalse((runtime / "stderr.bin").exists())
 
@@ -431,9 +554,12 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
                 "--input-path", str(input_path),
             ]
             fake_stdin = SimpleNamespace(buffer=io.BytesIO(bytes([1, 2])))
+            fake_stdout = _CaptureStdout()
             with patch.object(sanitizer_exec_guard.sys, "argv", argv), patch.object(
                 sanitizer_exec_guard.sys, "stdin", fake_stdin
-            ), patch.dict(os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False), patch.object(
+            ), patch.object(sanitizer_exec_guard.sys, "stdout", fake_stdout), patch.dict(
+                os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False
+            ), patch.object(
                 sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
             ), patch.object(
                 sanitizer_exec_guard, "verify_readonly_bind", return_value={"read_only": "true"}
@@ -441,10 +567,11 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
                 sanitizer_exec_guard.subprocess, "Popen", side_effect=OSError("exec denied")
             ):
                 self.assertEqual(sanitizer_exec_guard.main(), 0)
-            status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
+            status = _last_guard_status(fake_stdout.buffer.getvalue())
             self.assertFalse(status["harness_exec_succeeded"])
             self.assertTrue(status["launch_failure_confirmed"])
             self.assertEqual(status["guard_state"], "launch_failed")
+            self.assertFalse((runtime / "status.json").exists())
 
 
 class SanitizerGuardMountTests(unittest.TestCase):
@@ -684,12 +811,12 @@ class SanitizerMigrationTests(unittest.TestCase):
             "guard_state": "awaiting_manager_authorization",
             "harness_exec_succeeded": False,
         }
-        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
-            "engine.evidence.sanitizer._read_guard_status", return_value=ready
-        ):
-            status, error = _wait_for_guard_ready(
-                process, Path("/run/p3-ready"), "awaiting_manager_authorization", timeout=0.1
-            )
+        channel = SimpleNamespace(
+            wait_for_state=lambda expected, timeout: (ready, None)
+        )
+        status, error = _wait_for_guard_ready(
+            process, channel, "awaiting_manager_authorization", timeout=0.1
+        )
         self.assertEqual(status, ready)
         self.assertIsNone(error)
 
@@ -700,12 +827,14 @@ class SanitizerMigrationTests(unittest.TestCase):
             "guard_state": "preflight_blocked",
             "detail": "effective CPU quota missing",
         }
-        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
-            "engine.evidence.sanitizer._read_guard_status", return_value=refused
-        ):
-            status, error = _wait_for_guard_ready(
-                process, Path("/run/p3-refused"), "awaiting_private_staging", timeout=0.1
+        channel = SimpleNamespace(
+            wait_for_state=lambda expected, timeout: (
+                refused, str(refused.get("detail"))
             )
+        )
+        status, error = _wait_for_guard_ready(
+            process, channel, "awaiting_private_staging", timeout=0.1
+        )
         self.assertEqual(status, refused)
         self.assertIn("effective CPU quota missing", error)
 
@@ -718,21 +847,19 @@ class SanitizerMigrationTests(unittest.TestCase):
             "execution_status": "exited",
             "exit_code": 0,
         }
-        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
-            "engine.evidence.sanitizer._read_guard_status", return_value=finished
-        ):
-            status, error = _wait_for_guard_completion(
-                process, Path("/run/p3-finished"), timeout=0.1
-            )
+        channel = SimpleNamespace(
+            wait_for_terminal=lambda timeout: (finished, None)
+        )
+        status, error = _wait_for_guard_completion(process, channel, timeout=0.1)
         self.assertEqual(status, finished)
         self.assertIsNone(error)
 
     def test_guard_completion_refuses_to_guess_if_runtime_is_unreadable(self):
         process = SimpleNamespace(poll=lambda: None)
-        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 1, b"", b"")):
-            status, error = _wait_for_guard_completion(
-                process, Path("/run/p3-missing"), timeout=0.1
-            )
+        channel = SimpleNamespace(
+            wait_for_terminal=lambda timeout: (None, "Guard event channel ended before a terminal state was received.")
+        )
+        status, error = _wait_for_guard_completion(process, channel, timeout=0.1)
         self.assertIsNone(status)
         self.assertIn("terminal state", error)
 
