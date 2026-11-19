@@ -521,6 +521,8 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
             ), patch.object(sanitizer_exec_guard.sys, "stdout", fake_stdout), patch.dict(
                 os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False
             ), patch.object(
+                sanitizer_exec_guard, "prevent_ptrace_access", return_value=None
+            ), patch.object(
                 sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
             ), patch.object(
                 sanitizer_exec_guard, "verify_readonly_bind", return_value={"read_only": "true"}
@@ -559,6 +561,8 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
                 sanitizer_exec_guard.sys, "stdin", fake_stdin
             ), patch.object(sanitizer_exec_guard.sys, "stdout", fake_stdout), patch.dict(
                 os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False
+            ), patch.object(
+                sanitizer_exec_guard, "prevent_ptrace_access", return_value=None
             ), patch.object(
                 sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
             ), patch.object(
