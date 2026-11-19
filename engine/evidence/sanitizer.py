@@ -1858,8 +1858,8 @@ def collect_sanitizer_evidence(
                                 try:
                                     def _mark_manager_authorization_may_be_delivered() -> None:
                                         nonlocal manager_authorized, manager_authorization_may_be_delivered
-                                        manager_authorized = True
                                         manager_authorization_may_be_delivered = True
+                                        manager_authorized = True
                                         manifest["manager_authorization_state"] = "possibly_delivered"
                                         manifest["manager_authorization_may_have_been_delivered"] = True
                                         _write_manifest(attempt_dir, manifest)
