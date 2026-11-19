@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -30,6 +31,9 @@ from engine.evidence.sanitizer import (
     MANAGER_AUTHORIZATION_TOKEN,
     SanitizerCollectionError,
     _classify_output,
+    _close_process_stdin,
+    _execution_outcome_unknown,
+    _staged_permissions,
     _copy_service_streams,
     _stop_and_verify_service,
     _wait_for_guard_ready,
@@ -46,6 +50,61 @@ from engine.evidence.sanitizer_exec_guard import (
     verify_readonly_bind,
 )
 from engine.evidence.store import EvidenceStore
+
+
+class SanitizerProtocolRegressionTests(unittest.TestCase):
+    def test_role_specific_staging_permissions_match_runtime_needs(self):
+        self.assertEqual(_staged_permissions("input"), (0o400, 0o400))
+        self.assertEqual(_staged_permissions("harness"), (0o500, 0o500))
+        self.assertEqual(_staged_permissions("guard"), (0o444, 0o400))
+        with self.assertRaises(SanitizerCollectionError):
+            _staged_permissions("unexpected")
+
+    def test_final_authorization_without_durable_exec_ack_is_uncertain(self):
+        self.assertFalse(_execution_outcome_unknown(False, None))
+        self.assertTrue(_execution_outcome_unknown(True, None))
+        self.assertTrue(_execution_outcome_unknown(True, {
+            "guard_state": "manager_authorized",
+            "harness_exec_succeeded": False,
+        }))
+        self.assertTrue(_execution_outcome_unknown(True, {
+            "guard_state": "launch_failed",
+            "harness_exec_succeeded": False,
+            "launch_failure_confirmed": False,
+        }))
+        self.assertFalse(_execution_outcome_unknown(True, {
+            "guard_state": "launch_failed",
+            "harness_exec_succeeded": False,
+            "launch_failure_confirmed": True,
+        }))
+        self.assertFalse(_execution_outcome_unknown(True, {
+            "guard_state": "harness_running",
+            "harness_exec_succeeded": True,
+        }))
+
+    def test_missing_execution_identity_does_not_accept_marker(self):
+        families, assessment = _classify_output(
+            b"ERROR: AddressSanitizer: heap-use-after-free",
+            b"",
+            {"harness_exec_succeeded": True, "execution_status": "exited", "exit_code": 0},
+        )
+        self.assertEqual(families, [])
+        self.assertEqual(assessment, "inconclusive")
+
+    def test_close_stdin_detaches_closed_pipe_before_communicate(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read(); print('pipe-closed')"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertIsNotNone(process.stdin)
+        process.stdin.write(b"authorization")
+        _close_process_stdin(process)
+        self.assertIsNone(process.stdin)
+        stdout, stderr = process.communicate(timeout=3)
+        self.assertEqual(stdout.strip(), b"pipe-closed")
+        self.assertEqual(stderr, b"")
 
 
 class DiagnosticFlagVerificationTests(unittest.TestCase):
@@ -350,6 +409,40 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
             self.assertFalse(status["manager_authorization_received"])
             self.assertFalse((runtime / "stdout.bin").exists())
             self.assertFalse((runtime / "stderr.bin").exists())
+
+    def test_popen_failure_is_explicitly_confirmed_as_non_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            runtime.mkdir(mode=0o700)
+            input_path = runtime / "input.bin"
+            input_path.write_bytes(b"testcase")
+            harness_path = runtime / "kekkai_png_harness"
+            harness_path.write_bytes(b"registered harness image")
+            harness_path.chmod(0o500)
+            import hashlib
+            argv = [
+                "sanitizer_exec_guard.py",
+                "--expected-input-sha256", hashlib.sha256(b"testcase").hexdigest(),
+                "--expected-input-size", str(len(b"testcase")),
+                "--expected-harness-sha256", hashlib.sha256(b"registered harness image").hexdigest(),
+                "--harness-path", str(harness_path),
+                "--input-path", str(input_path),
+            ]
+            fake_stdin = SimpleNamespace(buffer=io.BytesIO(bytes([1, 2])))
+            with patch.object(sanitizer_exec_guard.sys, "argv", argv), patch.object(
+                sanitizer_exec_guard.sys, "stdin", fake_stdin
+            ), patch.dict(os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False), patch.object(
+                sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
+            ), patch.object(
+                sanitizer_exec_guard, "verify_readonly_bind", return_value={"read_only": "true"}
+            ), patch.object(
+                sanitizer_exec_guard.subprocess, "Popen", side_effect=OSError("exec denied")
+            ):
+                self.assertEqual(sanitizer_exec_guard.main(), 0)
+            status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
+            self.assertFalse(status["harness_exec_succeeded"])
+            self.assertTrue(status["launch_failure_confirmed"])
+            self.assertEqual(status["guard_state"], "launch_failed")
 
 
 class SanitizerGuardMountTests(unittest.TestCase):
