@@ -377,6 +377,8 @@ class _GuardEventChannel:
 
     def stream_result(self, kind: bytes) -> tuple[bytes | None, Path | None, str | None]:
         path = self.stream_paths[kind]
+        if self.reader is not None and self.reader.is_alive():
+            return None, None, "Guard event reader did not finish; preserving any partial stage file."
         if not path.exists():
             return None, None, self.error
         try:
