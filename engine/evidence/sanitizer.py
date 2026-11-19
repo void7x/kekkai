@@ -375,23 +375,40 @@ finally:
     return result.stdout
 
 
+_STAGED_PERMISSION_POLICY = {
+    "input": (0o400, 0o400),
+    "harness": (0o500, 0o500),
+    "guard": (0o444, 0o400),
+}
+
+
+def _staged_permissions(role: str) -> tuple[int, int]:
+    """Return (root bootstrap mode, post-handoff DynamicUser mode) for a staged role."""
+    try:
+        return _STAGED_PERMISSION_POLICY[role]
+    except KeyError as exc:
+        raise SanitizerCollectionError(f"Unknown private staging role: {role!r}.") from exc
+
+
 def _stage_root_file(
     source: Path,
     destination: Path,
     expected_sha256: str,
     maximum: int,
 ) -> tuple[str, int]:
-    """Create a root-owned immutable copy in /run for a read-only system-service bind."""
+    """Create a root-owned, role-restricted immutable copy in /run."""
     if (
         destination.parent != Path("/run")
         or not destination.name.startswith("kekkai-p3-03-stage-")
         or not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", destination.name)
     ):
         raise SanitizerCollectionError("Invalid private system-service staging destination.")
+    role = destination.name.rsplit("-", 1)[-1]
+    staged_mode, _ = _staged_permissions(role)
     helper = r'''
 import hashlib, os, stat, sys
-source, destination, expected, maximum, owner = sys.argv[1:]
-maximum, owner = int(maximum), int(owner)
+source, destination, expected, maximum, owner, file_mode = sys.argv[1:]
+maximum, owner, file_mode = int(maximum), int(owner), int(file_mode)
 fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
 out = None
 created = False
@@ -403,7 +420,7 @@ try:
         raise RuntimeError("source file is group/world writable")
     if before.st_size < 0 or before.st_size > maximum:
         raise RuntimeError("source exceeds the staging size limit")
-    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, file_mode)
     created = True
     digest, total = hashlib.sha256(), 0
     while True:
@@ -427,7 +444,7 @@ try:
         raise RuntimeError("source changed during root staging")
     if actual != expected:
         raise RuntimeError("source digest differs from the registered identity")
-    os.fchmod(out, 0o400)
+    os.fchmod(out, file_mode)
     os.fsync(out)
     os.close(out)
     out = None
@@ -451,7 +468,7 @@ finally:
 '''
     result = _sudo(
         [str(PYTHON), "-c", helper, str(source), str(destination),
-         expected_sha256, str(maximum), str(os.getuid())],
+         expected_sha256, str(maximum), str(os.getuid()), str(staged_mode)],
         timeout=10,
     )
     if result.returncode != 0:
@@ -500,29 +517,36 @@ if len(uids) != 4 or len(gids) != 4:
 uid, gid = int(uids[1]), int(gids[1])
 if uid <= 0 or gid <= 0:
     raise RuntimeError("Dynamic service identity must be non-root")
+root_modes = {"input": 0o400, "harness": 0o500, "guard": 0o444}
+dynamic_modes = {"input": 0o400, "harness": 0o500, "guard": 0o400}
 paths = [pathlib.Path(raw) for raw in raw_paths]
 for path in paths:
-    if path.parent != pathlib.Path("/run") or not path.name.startswith("kekkai-p3-03-stage-"):
+    role = path.name.rsplit("-", 1)[-1]
+    if path.parent != pathlib.Path("/run") or role not in root_modes:
         raise RuntimeError("staging path is outside the fixed /run namespace")
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o400 or info.st_nlink != 1:
-        raise RuntimeError("staging file identity changed before ownership transfer")
+    if (
+        not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+        or stat.S_IMODE(info.st_mode) != root_modes[role] or info.st_nlink != 1
+    ):
+        raise RuntimeError("staging file identity or bootstrap mode changed before ownership transfer")
 changed = []
 try:
     for path in paths:
+        role = path.name.rsplit("-", 1)[-1]
         os.chown(path, uid, gid, follow_symlinks=False)
-        os.chmod(path, 0o400, follow_symlinks=False)
+        changed.append((path, role))
+        os.chmod(path, dynamic_modes[role], follow_symlinks=False)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-        changed.append(path)
 except BaseException:
-    for path in changed:
+    for path, role in changed:
         try:
             os.chown(path, 0, 0, follow_symlinks=False)
-            os.chmod(path, 0o400, follow_symlinks=False)
+            os.chmod(path, root_modes[role], follow_symlinks=False)
         except OSError:
             pass
     raise
@@ -556,20 +580,21 @@ def _root_hash_regular_file(
     path: Path,
     maximum: int,
     expected_uid: int | None,
+    expected_mode: int = 0o400,
 ) -> tuple[str, int]:
     if expected_uid is None or path.parent != Path("/run"):
         raise SanitizerCollectionError("Root-staged file has no verified DynamicUser owner.")
     helper = r'''
 import hashlib, os, pathlib, stat, sys
 path = pathlib.Path(sys.argv[1])
-maximum, expected_uid = int(sys.argv[2]), int(sys.argv[3])
+maximum, expected_uid, expected_mode = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 if path.parent != pathlib.Path("/run"):
     raise RuntimeError("staged path is outside /run")
 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
 digest, total = hashlib.sha256(), 0
 try:
     before = os.fstat(fd)
-    if not stat.S_ISREG(before.st_mode) or before.st_uid != expected_uid or stat.S_IMODE(before.st_mode) != 0o400 or before.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != expected_uid or stat.S_IMODE(before.st_mode) != expected_mode or before.st_nlink != 1:
         raise RuntimeError("staged file ownership or mode differs from the verified DynamicUser identity")
     while True:
         block = os.read(fd, 65536)
@@ -588,7 +613,7 @@ finally:
     os.close(fd)
 '''
     result = _sudo(
-        [str(PYTHON), "-c", helper, str(path), str(maximum), str(expected_uid)],
+        [str(PYTHON), "-c", helper, str(path), str(maximum), str(expected_uid), str(expected_mode)],
         timeout=5,
     )
     if result.returncode != 0:
@@ -613,6 +638,8 @@ def _remove_root_staged_files(
     helper = r'''
 import os, pathlib, re, stat, sys
 allowed_owners = {int(item) for item in sys.argv[1].split(",")}
+root_modes = {"input": 0o400, "harness": 0o500, "guard": 0o444}
+dynamic_modes = {"input": 0o400, "harness": 0o500, "guard": 0o400}
 for raw in sys.argv[2:]:
     path = pathlib.Path(raw)
     if path.parent != pathlib.Path("/run") or not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", path.name):
@@ -621,8 +648,13 @@ for raw in sys.argv[2:]:
         info = path.lstat()
     except FileNotFoundError:
         continue
-    if not stat.S_ISREG(info.st_mode) or info.st_uid not in allowed_owners or stat.S_IMODE(info.st_mode) != 0o400 or info.st_nlink != 1:
-        raise RuntimeError("staging path identity changed; preserving it")
+    role = path.name.rsplit("-", 1)[-1]
+    expected_mode = root_modes[role] if info.st_uid == 0 else dynamic_modes[role]
+    if (
+        not stat.S_ISREG(info.st_mode) or info.st_uid not in allowed_owners
+        or stat.S_IMODE(info.st_mode) != expected_mode or info.st_nlink != 1
+    ):
+        raise RuntimeError("staging path identity or mode changed; preserving it")
     path.unlink()
 directory = os.open("/run", os.O_RDONLY | os.O_DIRECTORY)
 try:
@@ -1074,9 +1106,38 @@ def _systemd_run_argv(
             raise SanitizerCollectionError("Systemd source paths may not contain ':' or newline characters.")
     return argv
 
+def _close_process_stdin(process: subprocess.Popen) -> None:
+    """Close a Popen stdin pipe and detach it so communicate() does not flush a closed stream."""
+    stream = process.stdin
+    if stream is None:
+        return
+    try:
+        if not stream.closed:
+            stream.close()
+    finally:
+        process.stdin = None
+
+
+def _execution_outcome_unknown(
+    manager_authorized: bool,
+    guard_status: dict[str, Any] | None,
+) -> bool:
+    """A delivered final token needs a durable exec acknowledgement or a confirmed launch failure."""
+    if not manager_authorized:
+        return False
+    if guard_status is None:
+        return True
+    if guard_status.get("harness_exec_succeeded") is True:
+        return False
+    return not (
+        guard_status.get("guard_state") == "launch_failed"
+        and guard_status.get("launch_failure_confirmed") is True
+    )
+
+
 def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tuple[list[str], str]:
     families: set[str] = set()
-    identity_verified = status.get("execution_identity_verified", True) is True
+    identity_verified = status.get("execution_identity_verified") is True
     for stream in (stdout, stderr):
         if b"ERROR: AddressSanitizer:" in stream:
             families.add("address")
@@ -1647,10 +1708,12 @@ def collect_sanitizer_evidence(
                                 try:
                                     if systemd_process.stdin is None:
                                         raise BrokenPipeError("systemd-run stdin pipe is unavailable")
-                                    systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
-                                    systemd_process.stdin.flush()
-                                    systemd_process.stdin.close()
+                                    written = systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
+                                    if written != len(MANAGER_AUTHORIZATION_TOKEN):
+                                        raise BrokenPipeError("Final authorization token was not fully written")
                                     manager_authorized = True
+                                    systemd_process.stdin.flush()
+                                    _close_process_stdin(systemd_process)
                                 except (BrokenPipeError, OSError, ValueError) as exc:
                                     runner_error = (
                                         f"Could not deliver harness authorization: {type(exc).__name__}: {exc}"
@@ -1662,8 +1725,7 @@ def collect_sanitizer_evidence(
                                 )
 
             if not manager_authorized:
-                if systemd_process.stdin is not None and not systemd_process.stdin.closed:
-                    systemd_process.stdin.close()
+                _close_process_stdin(systemd_process)
             else:
                 _, completion_error = _wait_for_guard_completion(
                     systemd_process, runtime_dir, timeout=SERVICE_RUNTIME_SECONDS + 1.0
@@ -1695,9 +1757,9 @@ def collect_sanitizer_evidence(
         except KeyboardInterrupt:
             interrupted = True
             runner_error = "Collector received SIGINT/SIGTERM while the system service was active."
-            if systemd_process is not None and systemd_process.stdin is not None:
+            if systemd_process is not None:
                 try:
-                    systemd_process.stdin.close()
+                    _close_process_stdin(systemd_process)
                 except OSError:
                     pass
             _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
@@ -1708,11 +1770,10 @@ def collect_sanitizer_evidence(
             runner_error = f"Cannot start or communicate with systemd service: {type(exc).__name__}: {exc}"
         finally:
             if systemd_process is not None and systemd_process.poll() is None:
-                if systemd_process.stdin is not None and not systemd_process.stdin.closed:
-                    try:
-                        systemd_process.stdin.close()
-                    except OSError:
-                        pass
+                try:
+                    _close_process_stdin(systemd_process)
+                except OSError:
+                    pass
                 try:
                     _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
                 except SanitizerCollectionError:
@@ -1758,11 +1819,19 @@ def collect_sanitizer_evidence(
         guard_exec_succeeded = bool(
             guard_status and guard_status.get("harness_exec_succeeded") is True
         )
+        execution_outcome_unknown = _execution_outcome_unknown(manager_authorized, guard_status)
         runtime_copy_complete = (
             guard_status is not None
+            and not execution_outcome_unknown
             and (not guard_exec_succeeded or (stdout_stage is not None and stderr_stage is not None))
         )
-        if not runtime_exists and not runtime_probe_failed:
+        if execution_outcome_unknown:
+            runtime_cleanup_ok = False
+            runtime_cleanup_detail = (
+                "RuntimeDirectory retained because final authorization was delivered "
+                "without a durable exec acknowledgement or confirmed launch failure."
+            )
+        elif not runtime_exists and not runtime_probe_failed:
             runtime_cleanup_ok, runtime_cleanup_detail = True, None
         elif cleanup_ok and runtime_copy_complete:
             runtime_cleanup_ok, runtime_cleanup_detail = _clean_service_runtime(unit)
@@ -1802,10 +1871,12 @@ def collect_sanitizer_evidence(
                 "blocked_preflight", "launch_failed", "exited",
                 "signaled", "timed_out", "interrupted",
             ):
-                result_status = "interrupted" if exec_succeeded else "blocked_preflight"
+                result_status = "interrupted" if (exec_succeeded or execution_outcome_unknown) else "blocked_preflight"
+            if guard_status.get("launch_failure_confirmed") is True and guard_status.get("guard_state") == "launch_failed":
+                result_status = "launch_failed"
             # systemd's own RuntimeMaxSec watchdog can stop the complete service
             # before the guard gets a chance to persist its final status file.
-            if exec_succeeded and initial_properties.get("Result") == "timeout":
+            if exec_succeeded and final_properties.get("Result") == "timeout":
                 result_status = "timed_out"
             if interrupted and exec_succeeded:
                 result_status = "interrupted"
@@ -1838,7 +1909,7 @@ def collect_sanitizer_evidence(
         if exec_succeeded and stderr_stage is None:
             stderr_capture = "read_failed"
             stderr_detail = (stderr_detail or "Captured stderr file was unavailable.")
-        if not exec_succeeded:
+        if not exec_succeeded and not execution_outcome_unknown:
             stdout_capture = stderr_capture = "not_started"
             stdout_truncated = stderr_truncated = 0
             stdout_stage = stderr_stage = None
@@ -1876,9 +1947,9 @@ def collect_sanitizer_evidence(
         if stderr_publication == "published" and published_stderr is not None:
             stderr_capture = stderr_capture if stderr_capture in ("complete", "read_failed") else "read_failed"
 
-        if runner_error and not exec_succeeded and result_status != "launch_failed":
+        if runner_error and not exec_succeeded and not execution_outcome_unknown and result_status != "launch_failed":
             result_status = "blocked_preflight"
-        if result_status in ("blocked_preflight", "launch_failed"):
+        if result_status in ("blocked_preflight", "launch_failed") and not execution_outcome_unknown:
             stdout_capture = stderr_capture = "not_started"
             stdout_truncated = stderr_truncated = 0
             stdout_publication = stderr_publication = "not_started"
@@ -1897,7 +1968,7 @@ def collect_sanitizer_evidence(
                     current_harness, 32 * 1024 * 1024
                 )[0] == registered_harness_sha256,
                 "staged_harness_digest_unchanged": _root_hash_regular_file(
-                    root_harness, 32 * 1024 * 1024, root_staged_uid
+                    root_harness, 32 * 1024 * 1024, root_staged_uid, expected_mode=0o500
                 )[0] == registered_harness_sha256,
                 "staged_input_digest_unchanged": _root_hash_regular_file(
                     root_input, MAX_INPUT_BYTES, root_staged_uid
@@ -1909,7 +1980,7 @@ def collect_sanitizer_evidence(
                     store.read_verified_artifact(str(context["original_artifact_sha256"]))
                 ).hexdigest() == str(context["original_artifact_sha256"]),
                 "staged_guard_digest_unchanged": _root_hash_regular_file(
-                    root_guard, 1024 * 1024, root_staged_uid
+                    root_guard, 1024 * 1024, root_staged_uid, expected_mode=0o400
                 )[0] == guard_sha256,
             }
             for label, staged_path in (
@@ -1921,7 +1992,7 @@ def collect_sanitizer_evidence(
                 if (
                     not stat.S_ISREG(info.st_mode)
                     or info.st_uid != root_staged_uid
-                    or stat.S_IMODE(info.st_mode) != 0o400
+                    or stat.S_IMODE(info.st_mode) != _staged_permissions(label)[1]
                     or info.st_nlink != 1
                 ):
                     checks[f"staged_{label}_permissions"] = False
@@ -1940,7 +2011,11 @@ def collect_sanitizer_evidence(
                 "Final execution identity verification failed: "
                 + "; ".join(identity_verification["issues"])
             )
-        if cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed and identity_verification["passed"]:
+        if (
+            not execution_outcome_unknown
+            and cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed
+            and identity_verification["passed"]
+        ):
             root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(
                 root_staged_files, expected_uid=root_staged_uid
             )
@@ -1958,8 +2033,32 @@ def collect_sanitizer_evidence(
         cleanup_ok = cleanup_ok and root_stage_cleanup_ok
         cleanup_detail = cleanup_detail or root_stage_cleanup_detail
 
+        if execution_outcome_unknown:
+            manifest.update({
+                "state": "execution_outcome_unknown",
+                "manager_authorization_delivered": True,
+                "guard_status": guard_status,
+                "runtime_directory": str(runtime_dir) if runtime_exists else None,
+                "possible_output_stages": {
+                    "stdout": str(stdout_stage) if stdout_stage is not None else None,
+                    "stderr": str(stderr_stage) if stderr_stage is not None else None,
+                },
+                "root_staged_files": [str(item) for item in root_staged_files],
+                "detail": (
+                    "Final manager authorization was delivered, but neither a durable "
+                    "harness-exec acknowledgement nor a durable launch-failure confirmation "
+                    "is available. No non-execution database row was created."
+                ),
+            })
+            _write_manifest(attempt_dir, manifest)
+            raise SanitizerCollectionError(
+                "Execution outcome is unknown after final authorization. "
+                f"All available runtime, stream and staged-input evidence was retained at {attempt_dir}; "
+                "resolve this attempt before any retry."
+            )
+
         stdout_raw = stdout_bytes or b""
-        stderr_raw = stderr_bytes or b""
+        stderr_raw = stderr_bytes or b"""
         classification_status = {
             "harness_exec_succeeded": exec_succeeded,
             "execution_status": result_status,
@@ -2179,8 +2278,7 @@ def collect_sanitizer_evidence(
         if launch_requested and service_unit is not None and not service_finalization_attempted:
             try:
                 if systemd_process is not None and systemd_process.poll() is None:
-                    if systemd_process.stdin is not None and not systemd_process.stdin.closed:
-                        systemd_process.stdin.close()
+                    _close_process_stdin(systemd_process)
                     _sudo([str(SYSTEMCTL), "stop", service_unit], timeout=7)
                     try:
                         systemd_process.communicate(timeout=5)
