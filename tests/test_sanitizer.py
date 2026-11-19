@@ -41,6 +41,7 @@ from engine.evidence import sanitizer_exec_guard
 from engine.evidence.sanitizer_exec_guard import (
     STAGING_AUTHORIZATION_TOKEN as GUARD_STAGING_AUTHORIZATION_TOKEN,
     MANAGER_AUTHORIZATION_TOKEN as GUARD_MANAGER_AUTHORIZATION_TOKEN,
+    verify_readonly_bind,
 )
 from engine.evidence.store import EvidenceStore
 
@@ -302,6 +303,8 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
                 sanitizer_exec_guard.sys, "stdin", fake_stdin
             ), patch.dict(os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False), patch.object(
                 sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
+            ), patch.object(
+                sanitizer_exec_guard, "verify_readonly_bind", return_value={"read_only": "true"}
             ), patch.object(sanitizer_exec_guard.subprocess, "Popen") as popen:
                 self.assertEqual(sanitizer_exec_guard.main(), 0)
             popen.assert_not_called()
@@ -311,6 +314,23 @@ class SanitizerGuardHandshakeTests(unittest.TestCase):
             self.assertFalse(status["manager_authorization_received"])
             self.assertFalse((runtime / "stdout.bin").exists())
             self.assertFalse((runtime / "stderr.bin").exists())
+
+
+class SanitizerGuardMountTests(unittest.TestCase):
+    def test_readonly_bind_requires_exact_read_only_mount(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bound-input"
+            path.write_bytes(b"data")
+            mountpoint = str(path.resolve())
+            readonly = (
+                "36 25 0:32 / " + mountpoint
+                + " ro,nosuid,nodev - ext4 /dev/root ro\\n"
+            )
+            result = verify_readonly_bind(path, readonly)
+            self.assertEqual(result["read_only"], "true")
+            writable = readonly.replace(" ro,nosuid", " rw,nosuid")
+            with self.assertRaisesRegex(ValueError, "not read-only"):
+                verify_readonly_bind(path, writable)
 
 
 class SanitizerMigrationTests(unittest.TestCase):
