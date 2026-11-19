@@ -685,7 +685,10 @@ class CampaignCommandTests(unittest.TestCase):
             "import os, subprocess, sys, time\n"
             "from pathlib import Path\n"
             "descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-            f"Path({str(pid_file)!r}).write_text(str(os.getpid()) + ' ' + str(descendant.pid), encoding='ascii')\n"
+            f"pid_path = Path({str(pid_file)!r})\n"
+            "pid_tmp = pid_path.with_name(pid_path.name + '.tmp')\n"
+            "pid_tmp.write_text(str(os.getpid()) + ' ' + str(descendant.pid), encoding='ascii')\n"
+            "pid_tmp.replace(pid_path)\n"
             "time.sleep(60)\n"
         )
         fuzzer_script.write_text(fuzzer_source, encoding="utf-8")
