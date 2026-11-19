@@ -1253,7 +1253,7 @@ def _systemd_run_argv(
         "NoNewPrivileges=yes",
         "CapabilityBoundingSet=",
         "Delegate=no",
-        "ProtectControlGroups=yes",
+        "ProtectControlGroups=strict",
         "ProtectSystem=strict",
         "ProtectHome=yes",
         "PrivateTmp=yes",

@@ -519,7 +519,7 @@ class SanitizerClassificationTests(unittest.TestCase):
             self.assertIn("--property=MemoryMax=1G", argv)
             self.assertIn("--property=MemorySwapMax=0", argv)
             self.assertIn("--property=CPUQuota=60%", argv)
-            self.assertIn("--property=ProtectControlGroups=yes", argv)
+            self.assertIn("--property=ProtectControlGroups=strict", argv)
             self.assertIn("--property=KillMode=control-group", argv)
             harness_arg = argv.index("--harness-path")
             input_arg = argv.index("--input-path")
