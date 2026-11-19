@@ -566,9 +566,13 @@ def prepare_libpng_seed_corpus(
         parent = parent_input.resolve(strict=True)
         if Path(os.path.abspath(parent_input)) != parent:
             raise SeedCorpusError("Destination parent contains a symlink component.")
-        if not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
+        parent_initial_info = os.stat(parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(parent_initial_info.st_mode)
+            or not os.access(parent, os.W_OK | os.X_OK)
+        ):
             raise SeedCorpusError("Destination parent is not a writable directory.")
-        if os.stat(parent).st_uid != os.getuid():
+        if parent_initial_info.st_uid != os.getuid():
             raise SeedCorpusError("Destination parent must be owned by the current user.")
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, SeedCorpusError):
@@ -636,7 +640,10 @@ def prepare_libpng_seed_corpus(
         parent_fd = open_seed_directory(parent)
         parent_info = os.fstat(parent_fd)
         named_parent_info = os.stat(parent, follow_symlinks=False)
-        if not _same_directory(parent_info, named_parent_info):
+        if (
+            not _same_directory(parent_info, parent_initial_info)
+            or not _same_directory(parent_info, named_parent_info)
+        ):
             raise SeedCorpusError("Destination parent changed while it was being opened.")
 
         try:
