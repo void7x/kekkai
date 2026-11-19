@@ -1356,6 +1356,11 @@ def _execution_outcome_unknown(
         return True
     if guard_status.get("harness_exec_succeeded") is True:
         return False
+    if (
+        guard_status.get("guard_state") == "manager_authorization_refused"
+        and guard_status.get("manager_authorization_received") is False
+    ):
+        return False
     return not (
         guard_status.get("guard_state") == "launch_failed"
         and guard_status.get("launch_failure_confirmed") is True
