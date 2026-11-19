@@ -24,7 +24,10 @@ from engine.fuzzing.coverage import (
     _run_bounded_process,
     validate_coverage,
 )
-from engine.fuzzing.smoke import LIBPNG_SEED_CASES
+from engine.fuzzing.smoke import (
+    LIBPNG_ADDITIONAL_SEED_CASES,
+    LIBPNG_SEED_CASES,
+)
 
 
 class CoverageTests(unittest.TestCase):
@@ -101,6 +104,7 @@ class CoverageTests(unittest.TestCase):
         argv,
         *,
         all_maps_same=False,
+        additional_no_new_edges=False,
         empty_first_map=False,
         oversized_first_map=False,
         unstable_adam7=False,
@@ -147,14 +151,22 @@ class CoverageTests(unittest.TestCase):
             else:
                 content = b"000001:1\n000003:4\n"
         else:
-            seed_index = next(
-                index
-                for index, (_, filename) in enumerate(LIBPNG_SEED_CASES)
-                if filename == input_path.name
-            )
-            content = (
-                f"{seed_index + 1:06x}:1\n000100:2\n"
-            ).encode("ascii")
+            if (
+                additional_no_new_edges
+                and input_path.name in {
+                    filename for _, filename in LIBPNG_ADDITIONAL_SEED_CASES
+                }
+            ):
+                content = b"000001:1\n000100:2\n"
+            else:
+                seed_index = next(
+                    index
+                    for index, (_, filename) in enumerate(LIBPNG_SEED_CASES)
+                    if filename == input_path.name
+                )
+                content = (
+                    f"{seed_index + 1:06x}:1\n000100:2\n"
+                ).encode("ascii")
 
         map_path.write_bytes(content)
 
@@ -246,12 +258,12 @@ class CoverageTests(unittest.TestCase):
             report, mocked_run = self.run_coverage()
 
         self.assertTrue(report.passed, report.format())
-        self.assertEqual(len(report.cases), 10)
+        self.assertEqual(len(report.cases), 18)
         self.assertEqual(len(report.repeat_runs), 2)
-        self.assertEqual(report.distinct_map_count, 10)
+        self.assertEqual(report.distinct_map_count, 18)
         self.assertEqual(report.diversity_status, "passed")
         self.assertEqual(report.repeatability_status, "passed")
-        self.assertEqual(mocked_run.call_count, 13)
+        self.assertEqual(mocked_run.call_count, 21)
 
         for call in mocked_run.call_args_list:
             argv = call.args[0]
@@ -302,6 +314,21 @@ class CoverageTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(report.distinct_map_count, 1)
         self.assertEqual(report.diversity_status, "failed")
+
+    def test_rejects_no_coverage_gain_from_supplemental_seeds(self):
+        report, _ = self.run_coverage(additional_no_new_edges=True)
+
+        self.assertFalse(report.passed)
+        self.assertEqual(report.additional_edge_count, 0)
+        self.assertTrue(
+            any(
+                case.new_edges_vs_baseline == 0
+                for case in report.cases
+                if case.name in {
+                    name for name, _ in LIBPNG_ADDITIONAL_SEED_CASES
+                }
+            )
+        )
 
     def test_rejects_non_repeatable_adam7_map(self) -> None:
         report, _ = self.run_coverage(unstable_adam7=True)
