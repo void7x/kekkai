@@ -24,7 +24,8 @@ from typing import Any
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 STAGING_AUTHORIZATION_TOKEN = b"\x01"
-MANAGER_AUTHORIZATION_TOKEN = b"\x02"
+STAGING_AUTHORIZATION_TOKEN = bytes([1])
+MANAGER_AUTHORIZATION_TOKEN = bytes([2])
 READ_CHUNK = 64 * 1024
 HARNESS_PATH = "/run/kekkai-harness/kekkai_png_harness"
 RUNTIME_FILES = ("status.json", "status.tmp", "stdout.bin", "stderr.bin")
