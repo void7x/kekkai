@@ -1272,13 +1272,14 @@ def _systemd_run_argv(
         f"RuntimeDirectory={runtime_name}",
         "RuntimeDirectoryMode=0700",
         "RuntimeDirectoryPreserve=yes",
+        "RemainAfterExit=yes",
         f"BindReadOnlyPaths={input_source}:{input_dest}",
         f"BindReadOnlyPaths={harness_source}:{harness_dest}",
         f"BindReadOnlyPaths={guard_source}:{guard_dest}",
         f"WorkingDirectory={runtime_dir}",
     ]
     argv = [
-        str(SYSTEMD_RUN), "--system", "--quiet", "--pipe", "--remain-after-exit",
+        str(SYSTEMD_RUN), "--system", "--quiet", "--pipe",
         "--unit=" + unit, "--service-type=exec",
     ]
     argv.extend("--property=" + value for value in properties)

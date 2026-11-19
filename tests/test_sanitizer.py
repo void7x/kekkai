@@ -510,7 +510,8 @@ class SanitizerClassificationTests(unittest.TestCase):
                 "b" * 64,
             )
             self.assertIn("--pipe", argv)
-            self.assertIn("--remain-after-exit", argv)
+            self.assertIn("--property=RemainAfterExit=yes", argv)
+            self.assertNotIn("--remain-after-exit", argv)
             self.assertNotIn("--wait", argv)
             self.assertTrue(any(item.startswith("--property=BindReadOnlyPaths=") and ":/run/" in item for item in argv))
             self.assertIn("--input-path", argv)
