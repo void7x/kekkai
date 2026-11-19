@@ -33,6 +33,7 @@ from engine.evidence.sanitizer import (
     _copy_service_streams,
     _stop_and_verify_service,
     _wait_for_guard_ready,
+    _wait_for_guard_completion,
     _parse_properties,
     _resource_policy,
     _systemd_run_argv,
@@ -613,6 +614,33 @@ class SanitizerMigrationTests(unittest.TestCase):
         self.assertEqual(status, refused)
         self.assertIn("effective CPU quota missing", error)
 
+    def test_guard_completion_waits_for_terminal_status_before_unit_stop(self):
+        process = SimpleNamespace(poll=lambda: None)
+        finished = {
+            "schema_version": 1,
+            "guard_state": "finished",
+            "harness_exec_succeeded": True,
+            "execution_status": "exited",
+            "exit_code": 0,
+        }
+        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
+            "engine.evidence.sanitizer._read_guard_status", return_value=finished
+        ):
+            status, error = _wait_for_guard_completion(
+                process, Path("/run/p3-finished"), timeout=0.1
+            )
+        self.assertEqual(status, finished)
+        self.assertIsNone(error)
+
+    def test_guard_completion_refuses_to_guess_if_runtime_is_unreadable(self):
+        process = SimpleNamespace(poll=lambda: None)
+        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 1, b"", b"")):
+            status, error = _wait_for_guard_completion(
+                process, Path("/run/p3-missing"), timeout=0.1
+            )
+        self.assertIsNone(status)
+        self.assertIn("terminal state", error)
+
     def test_final_systemd_inspection_failure_is_not_cleanup_success(self):
         with patch(
             "engine.evidence.sanitizer._sudo",
@@ -625,6 +653,19 @@ class SanitizerMigrationTests(unittest.TestCase):
         self.assertFalse(okay)
         self.assertIn("unverified", detail)
         self.assertIn("show_error", final)
+
+    def test_positive_systemd_not_found_is_the_only_absence_shortcut(self):
+        with patch(
+            "engine.evidence.sanitizer._sudo",
+            return_value=subprocess.CompletedProcess([], 5, b"", b"unit not loaded"),
+        ), patch(
+            "engine.evidence.sanitizer._systemd_show",
+            return_value={"LoadState": "not-found"},
+        ):
+            okay, detail, final = _stop_and_verify_service("kekkai-p3-03-test", {})
+        self.assertTrue(okay)
+        self.assertIsNone(detail)
+        self.assertEqual(final["cgroup_populated"], "not-found")
 
     def test_identity_mismatch_prevents_positive_assessment(self):
         families, assessment = _classify_output(
