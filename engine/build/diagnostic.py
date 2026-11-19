@@ -458,6 +458,31 @@ def _register_build(evidence_root: Path, root: Path, source: Path, campaign_root
         store.close()
 
 
+def _verify_final_build_inputs(
+    source: Path,
+    source_archive: Path,
+    harness_source: Path,
+    expected_archive_sha256: str,
+    expected_tree_sha256: str,
+    expected_harness_sha256: str,
+) -> dict[str, str]:
+    """Recheck source and harness identities immediately before build registration."""
+    identity = verify_libpng_source_identity(source, source_archive)
+    if (
+        identity.archive_sha256 != expected_archive_sha256
+        or identity.tree_sha256 != expected_tree_sha256
+    ):
+        raise DiagnosticBuildError("Authenticated libpng source identity changed during the diagnostic build.")
+    harness_digest, _ = _hash_file(harness_source, 1024 * 1024)
+    if harness_digest != expected_harness_sha256 or harness_digest != HARNESS_SHA256:
+        raise DiagnosticBuildError("Repository harness source changed during the diagnostic build.")
+    return {
+        "source_archive_sha256": identity.archive_sha256,
+        "source_tree_sha256": identity.tree_sha256,
+        "harness_source_sha256": harness_digest,
+    }
+
+
 def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
                             build_dir: str | Path, evidence_root: str | Path) -> DiagnosticBuildResult:
     if os.geteuid() == 0:
@@ -664,6 +689,14 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
             digest, size = _hash_file(path, 16*1024*1024)
             metadata["artifacts"][name] = {"path":str(path),"sha256":digest,"size_bytes":size}
         metadata["harness_binary_path"] = str(harness)
+        metadata["verification"]["final_input_identity"] = _verify_final_build_inputs(
+            source,
+            config.target.source_archive,
+            harness_source,
+            identity.archive_sha256,
+            identity.tree_sha256,
+            harness_hash,
+        )
         metadata["status"] = "completed"; metadata["ended_at"] = utc_now_iso()
         _atomic_json(metadata_path, metadata)
         metadata_sha = _hash_file(metadata_path, 4*1024*1024)[0]
