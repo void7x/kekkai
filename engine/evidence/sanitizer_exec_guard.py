@@ -357,7 +357,6 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
 
     try:
-        prevent_ptrace_access()
         resource_observation = verify_limits()
         status["resource_observation"] = resource_observation
 
@@ -396,6 +395,10 @@ def main() -> int:
         }
         status["readonly_bind_mounts"] = readonly_binds
 
+        # The manager has completed the privileged staging handoff. Make the
+        # supervisor's pipe descriptors and memory inaccessible to the
+        # same-UID workload before the final authorization can be received.
+        prevent_ptrace_access()
         status["guard_state"] = "awaiting_manager_authorization"
         status["execution_status"] = "blocked_preflight"
         status["manager_authorization_received"] = False
