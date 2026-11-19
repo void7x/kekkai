@@ -18,6 +18,7 @@ from engine.build.diagnostic import (
     FRAME_POINTERS,
     SANITIZER,
     _validate_flags,
+    _verify_final_build_inputs,
     _verify_compile_commands,
 )
 from engine.evidence.database import open_database
@@ -134,6 +135,40 @@ class DiagnosticFlagVerificationTests(unittest.TestCase):
             path.write_text(json.dumps(rows), encoding="utf-8")
             with self.assertRaisesRegex(DiagnosticBuildError, "escapes"):
                 _verify_compile_commands(source.resolve(), path, compiler.resolve(), build.resolve())
+
+    def test_final_build_input_identity_is_rechecked_before_registration(self):
+        from engine.build import diagnostic
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            archive = root / "source.tar.xz"
+            harness = root / "harness.c"
+            source.mkdir()
+            archive.write_bytes(b"source archive")
+            harness.write_text("int main(void){return 0;}\\n", encoding="utf-8")
+            expected_harness = diagnostic.HARNESS_SHA256
+            identity = SimpleNamespace(
+                archive_sha256="a" * 64,
+                tree_sha256="b" * 64,
+            )
+            with patch.object(diagnostic, "verify_libpng_source_identity", return_value=identity), patch.object(
+                diagnostic, "_hash_file", return_value=(expected_harness, harness.stat().st_size)
+            ):
+                verified = _verify_final_build_inputs(
+                    source, archive, harness, "a" * 64, "b" * 64, expected_harness
+                )
+            self.assertEqual(verified["source_archive_sha256"], "a" * 64)
+            self.assertEqual(verified["source_tree_sha256"], "b" * 64)
+
+            changed = SimpleNamespace(archive_sha256="a" * 64, tree_sha256="c" * 64)
+            with patch.object(diagnostic, "verify_libpng_source_identity", return_value=changed), patch.object(
+                diagnostic, "_hash_file", return_value=(expected_harness, harness.stat().st_size)
+            ):
+                with self.assertRaisesRegex(DiagnosticBuildError, "source identity changed"):
+                    _verify_final_build_inputs(
+                        source, archive, harness, "a" * 64, "b" * 64, expected_harness
+                    )
 
 
 class SanitizerClassificationTests(unittest.TestCase):
