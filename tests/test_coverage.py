@@ -263,6 +263,16 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(report.distinct_map_count, 18)
         self.assertEqual(report.diversity_status, "passed")
         self.assertEqual(report.repeatability_status, "passed")
+        self.assertEqual(report.additional_edge_count, 8)
+        self.assertTrue(
+            all(
+                case.new_edges_vs_baseline == 1
+                for case in report.cases
+                if case.name in {
+                    name for name, _ in LIBPNG_ADDITIONAL_SEED_CASES
+                }
+            )
+        )
         self.assertEqual(mocked_run.call_count, 21)
 
         for call in mocked_run.call_args_list:
