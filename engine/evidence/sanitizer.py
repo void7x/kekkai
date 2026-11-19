@@ -1698,22 +1698,12 @@ def collect_sanitizer_evidence(
             assessment = "inconclusive"
             families = []
 
-        cleanup_status = "complete" if cleanup_ok else "failed"
         unresolved_publication = (
             stdout_publication == "pending_recovery" or stderr_publication == "pending_recovery"
         )
-        keep_files = set()
-        if stdout_publication == "pending_recovery":
-            keep_files.add("stdout.bin")
-        if stderr_publication == "pending_recovery":
-            keep_files.add("stderr.bin")
-        stage_cleanup_ok = _cleanup_attempt_files(attempt_dir, keep=keep_files)
-        if not stage_cleanup_ok:
-            cleanup_status = "failed"
-            cleanup_detail = cleanup_detail or "One or more private staging files could not be cleaned."
-        recovery_path_value = str(attempt_dir) if (
-            unresolved_publication or not cleanup_ok or not stage_cleanup_ok
-        ) else None
+        cleanup_status = "failed"
+        cleanup_detail = cleanup_detail or "Attempt stage cleanup has not yet been verified."
+        recovery_path_value = str(attempt_dir)
 
         attempt_finished = _now()
         runtime_observation.update({
@@ -1736,17 +1726,6 @@ def collect_sanitizer_evidence(
             raise SanitizerCollectionError(
                 "Runtime observations exceed the immutable database field limit; attempt files were preserved."
             )
-        manifest.update({
-            "state": "ready_to_commit",
-            "execution_status": result_status,
-            "harness_exec_succeeded": exec_succeeded,
-            "stdout_publication_state": stdout_publication,
-            "stderr_publication_state": stderr_publication,
-            "cleanup_status": cleanup_status,
-            "recovery_path": recovery_path_value,
-        })
-        _write_manifest(attempt_dir, manifest)
-
         record = {
             "run_uid": run_uid,
             "target_id": context["target_id"],
@@ -1798,6 +1777,69 @@ def collect_sanitizer_evidence(
             "stderr_detail": str(stderr_detail)[:1024] if stderr_detail else None,
             "recorded_at": _now(),
         }
+
+        # Persist the complete proposed record and CAS associations before removing
+        # any staging copy. A failed DB transaction can then be recovered exactly.
+        published_artifacts = {}
+        if published_stdout is not None:
+            published_artifacts["stdout"] = {
+                "sha256": published_stdout.sha256,
+                "size_bytes": published_stdout.size_bytes,
+                "storage_relpath": published_stdout.storage_relpath,
+            }
+        if published_stderr is not None:
+            published_artifacts["stderr"] = {
+                "sha256": published_stderr.sha256,
+                "size_bytes": published_stderr.size_bytes,
+                "storage_relpath": published_stderr.storage_relpath,
+            }
+        manifest.update({
+            "state": "record_prepared",
+            "execution_status": result_status,
+            "harness_exec_succeeded": exec_succeeded,
+            "stdout_publication_state": stdout_publication,
+            "stderr_publication_state": stderr_publication,
+            "published_artifacts": published_artifacts,
+            "proposed_record": record,
+            "stage_cleanup_state": "pending",
+            "recovery_path": str(attempt_dir),
+        })
+        _write_manifest(attempt_dir, manifest)
+
+        keep_files = set()
+        if stdout_publication == "pending_recovery":
+            keep_files.add("stdout.bin")
+        if stderr_publication == "pending_recovery":
+            keep_files.add("stderr.bin")
+        stage_cleanup_ok = _cleanup_attempt_files(attempt_dir, keep=keep_files)
+        unresolved_publication = (
+            stdout_publication == "pending_recovery" or stderr_publication == "pending_recovery"
+        )
+        cleanup_complete = cleanup_ok and stage_cleanup_ok and not unresolved_publication
+        if cleanup_complete:
+            cleanup_status = "complete"
+            cleanup_detail = None
+            recovery_path_value = None
+        else:
+            cleanup_status = "failed"
+            cleanup_detail = cleanup_detail or (
+                "Attempt files or service resources remain pending verified recovery."
+            )
+            recovery_path_value = str(attempt_dir)
+        record.update({
+            "cleanup_status": cleanup_status,
+            "cleanup_detail": cleanup_detail[:1024] if cleanup_detail else None,
+            "recovery_path": recovery_path_value,
+        })
+        manifest.update({
+            "state": "ready_to_commit",
+            "cleanup_status": cleanup_status,
+            "cleanup_detail": cleanup_detail,
+            "recovery_path": recovery_path_value,
+            "stage_cleanup_state": "complete" if stage_cleanup_ok else "failed",
+            "proposed_record": record,
+        })
+        _write_manifest(attempt_dir, manifest)
 
         with immediate_transaction(connection):
             if published_stdout is not None:
