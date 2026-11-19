@@ -198,6 +198,27 @@ def _run_bounded(argv: list[str], cwd: Path, env: dict[str, str], timeout: int,
                 pass
             proc.wait(timeout=3)
         code = proc.returncode
+    except BaseException:
+        # KeyboardInterrupt and exceptional exits must not leave compiler or
+        # descendant processes running after the caller regains control.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        for reader in readers:
+            reader.join(timeout=5)
+        raise
     for reader in readers:
         reader.join(timeout=5)
         if reader.is_alive():
@@ -256,7 +277,8 @@ def _verify_compile_commands(
         if not file.is_absolute():
             file = Path(row["directory"]) / file
         try:
-            rel = file.resolve(strict=True).relative_to(source).as_posix()
+            resolved_file = file.resolve(strict=True)
+            rel = resolved_file.relative_to(source).as_posix()
         except (OSError, ValueError) as exc:
             raise DiagnosticBuildError("Compile source is outside the authenticated libpng tree") from exc
         if rel not in EXPECTED_SOURCES or rel in seen:
@@ -282,7 +304,32 @@ def _verify_compile_commands(
         build_root = build_dir.resolve(strict=True)
         if not directory.is_relative_to(build_root):
             raise DiagnosticBuildError("Compile command working directory escapes the diagnostic build")
-        object_path = Path(args[args.index("-o") + 1])
+        output_index = args.index("-o") + 1
+        source_operands = []
+        skip_next = False
+        for index, token in enumerate(args[1:], start=1):
+            if skip_next:
+                skip_next = False
+                continue
+            if token in {"-o", "-I", "-isystem", "-D", "-U", "-MF", "-MT", "-MQ"}:
+                skip_next = True
+                continue
+            if token.startswith("-"):
+                continue
+            candidate = Path(token)
+            if not candidate.is_absolute():
+                candidate = directory / candidate
+            try:
+                resolved_candidate = candidate.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved_candidate == resolved_file and index != output_index:
+                source_operands.append(resolved_candidate)
+        if source_operands != [resolved_file]:
+            raise DiagnosticBuildError(
+                f"Compile command source operand does not uniquely name its database file: {rel}"
+            )
+        object_path = Path(args[output_index])
         if not object_path.is_absolute():
             object_path = directory / object_path
         object_path = object_path.resolve(strict=False)
@@ -431,6 +478,19 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
     build = Path(os.path.abspath(Path(build_dir).expanduser()))
     if build.exists() or not build.is_absolute():
         raise DiagnosticBuildError("Choose a new absolute diagnostic build directory")
+    absolute_parent = Path(build.parent.anchor)
+    for component in build.parent.parts[1:]:
+        absolute_parent = absolute_parent / component
+        try:
+            component_info = absolute_parent.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(component_info.st_mode):
+            raise DiagnosticBuildError(f"Diagnostic build parent contains a symlink: {absolute_parent}")
+    canonical_parent = build.parent.resolve(strict=True)
+    if canonical_parent != build.parent:
+        raise DiagnosticBuildError("Diagnostic build parent is not a canonical path")
+    build = canonical_parent / build.name
     if not build.parent.is_dir() or build.parent.stat().st_uid != os.getuid():
         raise DiagnosticBuildError("Build parent must exist and be owned by the current user")
     protected = [root, source, config.target.output_parent.resolve(strict=True), evidence]
@@ -446,7 +506,7 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
     clang_version = _tool_text(compiler, "--version", env=env)
     if CLANG_VERSION not in clang_version:
         raise DiagnosticBuildError(f"Expected Clang 21.1.8, found {clang_version.splitlines()[0]}")
-    tools = {"clang": {"path":str(compiler), "version":clang_version.splitlines()[0],
+    tools = {"clang": {"path":str(compiler), "version":clang_version,
                        "sha256":_hash_file(compiler)[0], "package":_package(compiler, env)}}
     system_tools = {"cmake":_system_executable(CMAKE), "ninja":_system_executable(NINJA),
                     "llvm_ar":_system_executable(LLVM_AR), "llvm_nm":_system_executable(LLVM_NM)}
@@ -500,8 +560,9 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
         library = [str(ninja), "-C", str(build), "-j", "2", "-v", "png_static"]
         for label, argv in (("configure", configure), ("library", library)):
             out, err = build/f"{label}.stdout.log", build/f"{label}.stderr.log"
+            step_started = utc_now_iso()
             result = _run_bounded(argv, build, env, 900, out, err)
-            result.update({"name":label, "started_at":utc_now_iso(), "ended_at":utc_now_iso()})
+            result.update({"name":label, "started_at":step_started, "ended_at":utc_now_iso()})
             metadata["steps"].append(result); _atomic_json(metadata_path, metadata)
             if result["timed_out"] or result["return_code"] != 0 or result["capture_errors"]:
                 raise DiagnosticBuildError(f"{label} step failed: {result}")
@@ -519,6 +580,25 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
         expected_members = sorted(Path(name).name+".o" for name in EXPECTED_SOURCES)
         if ar_result.returncode or sorted(members) != expected_members or len(members) != 17:
             raise DiagnosticBuildError("Static archive member list differs from the exact 17-source build")
+        object_map = {}
+        for entry in commands:
+            object_path = Path(entry["object_path"])
+            if object_path.is_symlink() or not object_path.is_file():
+                raise DiagnosticBuildError(f"Verified object output is missing or unsafe: {object_path}")
+            member_name = object_path.name
+            if member_name in object_map:
+                raise DiagnosticBuildError(f"Object member name is ambiguous: {member_name}")
+            object_map[member_name] = object_path
+        for member in members:
+            if member not in object_map:
+                raise DiagnosticBuildError(f"Archive member has no verified compile command mapping: {member}")
+            extracted = subprocess.run([str(system_tools["llvm_ar"]), "p", str(archive), member],
+                cwd=build, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=15, check=False, shell=False, close_fds=True)
+            if extracted.returncode or len(extracted.stdout) > 64 * 1024 * 1024:
+                raise DiagnosticBuildError(f"Cannot safely extract archive member for verification: {member}")
+            if hashlib.sha256(extracted.stdout).hexdigest() != _hash_file(object_map[member])[0]:
+                raise DiagnosticBuildError(f"Archive member bytes differ from the verified compile output: {member}")
         nm = subprocess.run([str(system_tools["llvm_nm"]), "-A", "-u", str(archive)], cwd=build,
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=20, check=False, shell=False, close_fds=True)
@@ -532,16 +612,52 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
             SANITIZER, "-fno-omit-frame-pointer", "-I", str(source), "-I", str(build),
             str(harness_source), str(archive), str(zlib), "-lm", "-o", str(harness)]
         _validate_flags(link_argv)
+        harness_step_started = utc_now_iso()
         result = _run_bounded(link_argv, build, env, 900,
             build/"harness.stdout.log", build/"harness.stderr.log")
-        result.update({"name":"harness", "started_at":utc_now_iso(), "ended_at":utc_now_iso()})
+        result.update({"name":"harness", "started_at":harness_step_started, "ended_at":utc_now_iso()})
         metadata["steps"].append(result); metadata["verification"]["harness_link_argv"] = link_argv
         _atomic_json(metadata_path, metadata)
         if result["timed_out"] or result["return_code"] != 0 or result["capture_errors"]:
             raise DiagnosticBuildError("Diagnostic harness compilation/link failed")
         metadata["verification"]["runtime_probes"] = _probe_runtimes(build, compiler, env)
+        required_header_macros = (
+            "PNG_READ_SUPPORTED",
+            "PNG_SEQUENTIAL_READ_SUPPORTED",
+            "PNG_READ_ANCILLARY_CHUNKS_SUPPORTED",
+            "PNG_READ_INTERLACING_SUPPORTED",
+            "PNG_SETJMP_SUPPORTED",
+            "PNG_SET_USER_LIMITS_SUPPORTED",
+        )
+        generated_header = build / "pnglibconf.h"
+        header_text = generated_header.read_text(encoding="utf-8")
+        missing_header_macros = [
+            macro for macro in required_header_macros
+            if not re.search(r"^\\s*#\\s*define\\s+" + re.escape(macro) + r"\\b", header_text, re.M)
+        ]
+        if missing_header_macros:
+            raise DiagnosticBuildError(
+                "Generated libpng header lacks required harness features: "
+                + ", ".join(missing_header_macros)
+            )
+        metadata["verification"]["generated_header_features"] = {
+            "required": list(required_header_macros),
+            "verified": True,
+        }
+        harness_symbols = subprocess.run(
+            [str(system_tools["llvm_nm"]), "-A", str(harness)], cwd=build,
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=20, check=False, shell=False, close_fds=True,
+        )
+        symbol_text = harness_symbols.stdout.decode("utf-8", errors="replace")
+        if harness_symbols.returncode or "__asan_init" not in symbol_text or "__ubsan_handle_" not in symbol_text:
+            raise DiagnosticBuildError("Linked harness does not expose both ASan and UBSan runtime symbols")
+        metadata["verification"]["harness_instrumentation_symbols"] = {
+            "asan_init": "__asan_init" in symbol_text,
+            "ubsan_handler": "__ubsan_handle_" in symbol_text,
+        }
         outputs = {"harness_binary":harness,"library_archive":archive,"cmake_cache":cache,
-                   "compile_database":compile_db,"generated_header":build/"pnglibconf.h"}
+                   "compile_database":compile_db,"generated_header":generated_header}
         for name, path in outputs.items():
             if path.is_symlink() or not path.is_file():
                 raise DiagnosticBuildError(f"Required output is missing or unsafe: {name}")
