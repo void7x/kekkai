@@ -1,6 +1,6 @@
 # Libpng seed-corpus expansion
 
-**Status:** Implementation prepared; local WSL preparation and native validation pending.
+**Status:** Descriptor-anchored preparation fix committed; owner-side WSL revalidation pending. Earlier WSL corpus preparation and native coverage results are recorded below as owner-reported results, not as validation of the latest fix.
 **Base:** `development` at `64db5c3050fd68ac601dd189b89b1c6e3f574e0e`
 **Branch:** `feature/libpng-seed-corpus`
 

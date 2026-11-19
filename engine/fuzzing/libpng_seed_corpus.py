@@ -6,10 +6,9 @@ import ctypes
 import errno
 import hashlib
 import os
-import shutil
+import secrets
 import stat
 import struct
-import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +16,8 @@ from pathlib import Path
 from engine.evidence.seed_manifest import (
     SeedManifest,
     SeedManifestError,
-    build_seed_manifest,
+    build_seed_manifest_from_fd,
+    open_seed_directory,
 )
 
 
@@ -381,7 +381,7 @@ def _read_seed_at(
         os.close(descriptor)
 
 
-def _write_new_file(directory: Path, name: str, content: bytes) -> None:
+def _write_new_file_at(directory_fd: int, name: str, content: bytes) -> None:
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -389,7 +389,7 @@ def _write_new_file(directory: Path, name: str, content: bytes) -> None:
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    descriptor = os.open(directory / name, flags, 0o600)
+    descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
     try:
         view = memoryview(content)
         offset = 0
@@ -401,6 +401,109 @@ def _write_new_file(directory: Path, name: str, content: bytes) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _create_staging_directory_at(
+    parent_fd: int,
+    prefix: str,
+) -> tuple[str, int]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    for _attempt in range(128):
+        name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+
+        descriptor = None
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise SeedCorpusError("Staging directory is not a user-owned directory.")
+            return name, descriptor
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+
+    raise SeedCorpusError("Could not allocate a unique staging directory name.")
+
+
+def _same_directory(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(first.st_mode)
+        and stat.S_ISDIR(second.st_mode)
+        and first.st_dev == second.st_dev
+        and first.st_ino == second.st_ino
+    )
+
+
+def _cleanup_staging_directory_at(
+    parent_fd: int,
+    staging_name: str,
+    staging_fd: int,
+) -> None:
+    """Best-effort cleanup using only the retained parent/staging descriptors."""
+    try:
+        opened_info = os.fstat(staging_fd)
+        named_info = os.stat(
+            staging_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if not _same_directory(opened_info, named_info):
+            return
+
+        # The staging layout is deliberately flat. Never recurse into an
+        # unexpected directory or follow a symlink during failure cleanup.
+        for name in os.listdir(staging_fd):
+            entry_info = os.stat(name, dir_fd=staging_fd, follow_symlinks=False)
+            if stat.S_ISDIR(entry_info.st_mode):
+                return
+            os.unlink(name, dir_fd=staging_fd)
+
+        os.fsync(staging_fd)
+        current_info = os.stat(
+            staging_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if _same_directory(os.fstat(staging_fd), current_info):
+            os.rmdir(staging_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+    except OSError:
+        # Cleanup must not follow a replaced path or mask the original failure.
+        return
+
+
+def _verify_parent_path_binding(parent: Path, parent_fd: int) -> None:
+    """Refuse to return a pathname that no longer names the retained parent."""
+    try:
+        opened_info = os.fstat(parent_fd)
+        named_info = os.stat(parent, follow_symlinks=False)
+    except OSError as exc:
+        raise SeedCorpusError(
+            "Destination parent path changed during preparation."
+        ) from exc
+    if (
+        opened_info.st_dev != named_info.st_dev
+        or opened_info.st_ino != named_info.st_ino
+        or not stat.S_ISDIR(named_info.st_mode)
+    ):
+        raise SeedCorpusError(
+            "Destination parent path changed during preparation; "
+            "the published corpus remains in the originally opened directory."
+        )
 
 
 def _overlaps(first: Path, second: Path) -> bool:
@@ -449,11 +552,7 @@ def prepare_libpng_seed_corpus(
     campaign_output_parent: str | Path,
     max_input_bytes: int = 8 * 1024 * 1024,
 ) -> SeedCorpusPreparation:
-    """Copy the original corpus and append candidates into a new external directory.
-
-    The source directory is never modified. The destination must not exist and
-    must remain outside the repository, target source, and campaign-output tree.
-    """
+    """Copy the original corpus into a new external, descriptor-anchored directory."""
     if isinstance(max_input_bytes, bool) or not isinstance(max_input_bytes, int) or max_input_bytes < 1:
         raise SeedCorpusError("The maximum input size must be a positive integer.")
 
@@ -461,31 +560,6 @@ def prepare_libpng_seed_corpus(
     destination_input = Path(destination_dir).expanduser()
     if not source.is_absolute() or not destination_input.is_absolute():
         raise SeedCorpusError("Source and destination paths must be absolute.")
-
-    try:
-        source_manifest = build_seed_manifest(
-            source,
-            max_file_bytes=max_input_bytes,
-        )
-    except (OSError, ValueError, RuntimeError, SeedManifestError) as exc:
-        raise SeedCorpusError(f"Original seed corpus failed validation: {exc}") from exc
-
-    source_names = {name for name, _, _ in source_manifest.entries}
-    missing = sorted(LIBPNG_BASE_SEED_FILES - source_names)
-    unexpected = sorted(source_names - LIBPNG_BASE_SEED_FILES)
-    if missing or unexpected:
-        details = []
-        if missing:
-            details.append(
-                "missing required pilot seeds: " + ", ".join(missing)
-            )
-        if unexpected:
-            details.append("unexpected entries: " + ", ".join(unexpected))
-        raise SeedCorpusError(
-            "Original seed corpus must contain exactly the ten approved pilot seeds ("
-            + "; ".join(details)
-            + ")."
-        )
 
     parent_input = destination_input.parent
     try:
@@ -504,8 +578,6 @@ def prepare_libpng_seed_corpus(
     if destination_input.name in {"", ".", ".."}:
         raise SeedCorpusError("Destination directory name is invalid.")
     destination = parent / destination_input.name
-    if os.path.lexists(destination):
-        raise SeedCorpusError(f"Destination already exists; refusing to overwrite: {destination}")
 
     protected = (
         ("repository", repository_root),
@@ -523,50 +595,64 @@ def prepare_libpng_seed_corpus(
             )
 
     candidate_bytes = generate_additional_seed_bytes()
-    collisions = sorted(source_names.intersection(candidate_bytes))
-    if collisions:
-        raise SeedCorpusError(
-            "Original corpus already contains supplemental filenames: "
-            + ", ".join(collisions)
+    parent_fd = None
+    source_fd = None
+    staging_fd = None
+    staging_name = None
+    published = False
+    try:
+        # Open both directories once. All later corpus I/O is relative to these
+        # descriptors so renaming/replacing their pathnames cannot redirect it.
+        source_fd = open_seed_directory(source)
+        source_manifest = build_seed_manifest_from_fd(
+            source_fd,
+            max_file_bytes=max_input_bytes,
         )
 
-    parent_fd = None
-    staging_path = None
-    source_fd = None
-    try:
-        parent_fd = os.open(
-            parent,
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
-        )
+        source_names = {name for name, _, _ in source_manifest.entries}
+        missing = sorted(LIBPNG_BASE_SEED_FILES - source_names)
+        unexpected = sorted(source_names - LIBPNG_BASE_SEED_FILES)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(
+                    "missing required pilot seeds: " + ", ".join(missing)
+                )
+            if unexpected:
+                details.append("unexpected entries: " + ", ".join(unexpected))
+            raise SeedCorpusError(
+                "Original seed corpus must contain exactly the ten approved pilot seeds ("
+                + "; ".join(details)
+                + ")."
+            )
+
+        collisions = sorted(source_names.intersection(candidate_bytes))
+        if collisions:
+            raise SeedCorpusError(
+                "Original corpus already contains supplemental filenames: "
+                + ", ".join(collisions)
+            )
+
+        parent_fd = open_seed_directory(parent)
         parent_info = os.fstat(parent_fd)
         named_parent_info = os.stat(parent, follow_symlinks=False)
-        if (
-            not stat.S_ISDIR(parent_info.st_mode)
-            or (parent_info.st_dev, parent_info.st_ino)
-            != (named_parent_info.st_dev, named_parent_info.st_ino)
-        ):
+        if not _same_directory(parent_info, named_parent_info):
             raise SeedCorpusError("Destination parent changed while it was being opened.")
 
-        staging_path = Path(tempfile.mkdtemp(
-            prefix=f".{destination.name}.tmp-",
-            dir=parent,
-        ))
-        staging_parent_info = os.stat(staging_path.parent, follow_symlinks=False)
-        if (
-            (parent_info.st_dev, parent_info.st_ino)
-            != (staging_parent_info.st_dev, staging_parent_info.st_ino)
-        ):
-            raise SeedCorpusError("Destination parent changed during staging creation.")
-        source_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
+        try:
+            os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise SeedCorpusError(
+                f"Destination already exists; refusing to overwrite: {destination}"
+            )
+
+        staging_name, staging_fd = _create_staging_directory_at(
+            parent_fd,
+            f".{destination.name}.tmp-",
         )
-        source_fd = os.open(source, source_flags)
+
         for name, size, digest in source_manifest.entries:
             content = _read_seed_at(
                 source_fd,
@@ -575,34 +661,27 @@ def prepare_libpng_seed_corpus(
                 expected_sha256=digest,
                 maximum_bytes=max_input_bytes,
             )
-            _write_new_file(staging_path, name, content)
+            _write_new_file_at(staging_fd, name, content)
 
-        for filename, content in candidate_bytes.items():
-            if len(content) > max_input_bytes:
-                raise SeedCorpusError(f"Generated seed exceeds the input limit: {filename}")
-            _write_new_file(staging_path, filename, content)
-
-        # Validate every generated file with the same bounded PNG semantics
-        # used by the actual harness smoke gate.
-        from engine.fuzzing.smoke import _validate_seed_fixture
+        from engine.fuzzing.smoke import _validate_seed_fixture_data
 
         case_by_filename = {
             filename: case_name
             for case_name, filename in LIBPNG_ADDITIONAL_SEED_CASES
         }
-        for filename in candidate_bytes:
-            _validate_seed_fixture(
-                case_by_filename[filename],
-                staging_path / filename,
-            )
+        for filename, content in candidate_bytes.items():
+            if len(content) > max_input_bytes:
+                raise SeedCorpusError(f"Generated seed exceeds the input limit: {filename}")
+            _validate_seed_fixture_data(case_by_filename[filename], content)
+            _write_new_file_at(staging_fd, filename, content)
 
         try:
-            copied_source_manifest = build_seed_manifest(
-                source,
+            copied_source_manifest = build_seed_manifest_from_fd(
+                source_fd,
                 max_file_bytes=max_input_bytes,
             )
-            final_manifest = build_seed_manifest(
-                staging_path,
+            final_manifest = build_seed_manifest_from_fd(
+                staging_fd,
                 max_file_bytes=max_input_bytes,
             )
         except (OSError, ValueError, RuntimeError, SeedManifestError) as exc:
@@ -631,12 +710,35 @@ def prepare_libpng_seed_corpus(
         if final_manifest.seed_count != source_manifest.seed_count + len(candidate_bytes):
             raise SeedCorpusError("Prepared corpus has an unexpected seed count.")
 
+        staging_info = os.fstat(staging_fd)
+        named_staging_info = os.stat(
+            staging_name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if not _same_directory(staging_info, named_staging_info):
+            raise SeedCorpusError("Staging directory entry changed before publication.")
+
+        os.fsync(staging_fd)
         _rename_directory_noreplace(
             parent_fd,
-            staging_path.name,
+            staging_name,
             destination.name,
         )
+        published = True
+
+        published_info = os.stat(
+            destination.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if not _same_directory(os.fstat(staging_fd), published_info):
+            raise SeedCorpusError(
+                "Published destination does not match the verified staging directory."
+            )
+
         os.fsync(parent_fd)
+        _verify_parent_path_binding(parent, parent_fd)
 
         return SeedCorpusPreparation(
             destination=destination,
@@ -648,9 +750,16 @@ def prepare_libpng_seed_corpus(
     except (OSError, ValueError, RuntimeError) as exc:
         raise SeedCorpusError(f"Could not prepare supplemental seed corpus: {exc}") from exc
     finally:
+        if (
+            not published
+            and parent_fd is not None
+            and staging_fd is not None
+            and staging_name is not None
+        ):
+            _cleanup_staging_directory_at(parent_fd, staging_name, staging_fd)
+        if staging_fd is not None:
+            os.close(staging_fd)
         if source_fd is not None:
             os.close(source_fd)
-        if staging_path is not None and staging_path.exists():
-            shutil.rmtree(staging_path, ignore_errors=True)
         if parent_fd is not None:
             os.close(parent_fd)

@@ -322,8 +322,11 @@ def _validate_png_image_data(
 
 def _validate_seed_fixture(case_name: str, path: Path) -> None:
     """Verify that a named smoke fixture really represents its intended case."""
-    data = path.read_bytes()
+    _validate_seed_fixture_data(case_name, path.read_bytes())
 
+
+def _validate_seed_fixture_data(case_name: str, data: bytes) -> None:
+    """Validate fixture semantics from bytes without resolving a filesystem path."""
     if case_name == "malformed_png":
         if not data or data.startswith(_PNG_SIGNATURE):
             raise ValueError("Malformed fixture must have a non-PNG signature.")

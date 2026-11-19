@@ -124,6 +124,57 @@ class LibpngSeedCorpusTests(unittest.TestCase):
         self.assertEqual(self.destination.stat().st_ino, observed["inode"])
         self.assertEqual(list(self.destination.iterdir()), [])
 
+    def test_failure_cleanup_uses_retained_parent_after_parent_rebinding(self) -> None:
+        moved_parent = self.workspace.with_name("workspace-moved")
+        observed = {}
+
+        def rebind_parent_and_fail(parent_fd, source_name, destination_name):
+            self.workspace.rename(moved_parent)
+            self.workspace.mkdir()
+            decoy = self.workspace / source_name
+            decoy.mkdir()
+            marker = decoy / "keep.txt"
+            marker.write_text("unrelated", encoding="utf-8")
+            observed["marker"] = marker
+            raise SeedCorpusError("simulated publication failure")
+
+        with patch(
+            "engine.fuzzing.libpng_seed_corpus._rename_directory_noreplace",
+            side_effect=rebind_parent_and_fail,
+        ):
+            with self.assertRaisesRegex(SeedCorpusError, "simulated publication failure"):
+                self.prepare()
+
+        self.assertEqual(observed["marker"].read_text(encoding="utf-8"), "unrelated")
+        self.assertFalse((moved_parent / observed["marker"].parent.name).exists())
+
+    def test_successful_publication_does_not_cleanup_rebound_staging_path(self) -> None:
+        from engine.fuzzing import libpng_seed_corpus
+
+        original_publish = libpng_seed_corpus._rename_directory_noreplace
+        moved_parent = self.workspace.with_name("workspace-moved")
+        observed = {}
+
+        def publish_then_rebind_parent(parent_fd, source_name, destination_name):
+            original_publish(parent_fd, source_name, destination_name)
+            self.workspace.rename(moved_parent)
+            self.workspace.mkdir()
+            decoy = self.workspace / source_name
+            decoy.mkdir()
+            marker = decoy / "keep.txt"
+            marker.write_text("unrelated", encoding="utf-8")
+            observed["marker"] = marker
+
+        with patch(
+            "engine.fuzzing.libpng_seed_corpus._rename_directory_noreplace",
+            side_effect=publish_then_rebind_parent,
+        ):
+            with self.assertRaisesRegex(SeedCorpusError, "Destination parent path changed"):
+                self.prepare()
+
+        self.assertTrue((moved_parent / self.destination.name).is_dir())
+        self.assertEqual(observed["marker"].read_text(encoding="utf-8"), "unrelated")
+
     def test_refuses_destination_inside_repository(self) -> None:
         destination = self.repository / "generated-seeds"
 
