@@ -210,17 +210,37 @@ def _validate_flags(argv: list[str]) -> None:
     sanitizer = [x for x in argv if x.startswith("-fsanitize=")]
     if sanitizer != [SANITIZER]:
         raise DiagnosticBuildError("Compiler command must enable ASan+UBSan exactly once")
-    forbidden = ("-fno-sanitize", "-fsanitize-trap", "-fsanitize-minimal-runtime",
-        "-fno-sanitize-recover", "-fsanitize-ignorelist", "-fsanitize-blacklist",
-        "-fsanitize-link-runtime=false")
-    if any(x.startswith(forbidden) for x in argv):
-        raise DiagnosticBuildError("Conflicting sanitizer override detected")
-    if any(x.startswith("@") or x in {"-Xclang", "-fplugin", "-load", "-plugin"}
-           or x.startswith("-fplugin=") or x.startswith("--config") for x in argv):
-        raise DiagnosticBuildError("Response files, Clang config and compiler plugins are prohibited")
+    forbidden_prefixes = (
+        "-fno-sanitize", "-fsanitize-trap", "-fsanitize-minimal-runtime",
+        "-fno-sanitize-recover", "-fsanitize-recover", "-fsanitize-ignorelist",
+        "-fsanitize-blacklist", "-fsanitize-link-runtime=false",
+        "-fomit-frame-pointer", "-fno-omit-frame-pointer=", "-g0",
+        "-fplugin", "-fprofile", "-fcoverage", "-fuse-ld=",
+        "--config=", "--config-system-dir=", "--config-user-dir=",
+        "--target=", "-target", "-resource-dir", "--sysroot=", "-isysroot",
+        "-ivfsoverlay", "-include-pch", "-fmodule-map-file", "-fmodules-cache-path",
+        "-fpass-plugin=", "-load-pass-plugin=", "--gcc-toolchain=", "--gcc-install-dir=",
+    )
+    forbidden_exact = {
+        "-Xclang", "-Xlinker", "-mllvm", "-load", "-plugin", "-B",
+        "-include", "-imacros", "-specs", "--config",
+    }
+    for index, token in enumerate(argv):
+        if token.startswith(forbidden_prefixes) or token in forbidden_exact:
+            raise DiagnosticBuildError(f"Unapproved compiler/linker override: {token}")
+        if token.startswith("@") or token.startswith("-Wl,"):
+            raise DiagnosticBuildError("Response files and linker pass-through options are prohibited")
+        if token in forbidden_exact and index + 1 >= len(argv):
+            raise DiagnosticBuildError(f"Missing operand after {token}")
+    if argv.count(FRAME_POINTERS) != 1 or "-fomit-frame-pointer" in argv:
+        raise DiagnosticBuildError("Frame-pointer preservation is not effective")
+    if "-g" not in argv or "-g0" in argv or "-gline-tables-only" in argv:
+        raise DiagnosticBuildError("Full debug information is not effective")
 
 
-def _verify_compile_commands(source: Path, path: Path, compiler: Path) -> list[dict[str, Any]]:
+def _verify_compile_commands(
+    source: Path, path: Path, compiler: Path, build_dir: Path
+) -> list[dict[str, Any]]:
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -252,15 +272,27 @@ def _verify_compile_commands(source: Path, path: Path, compiler: Path) -> list[d
         if Path(args[0]).resolve(strict=True) != compiler:
             raise DiagnosticBuildError("Compile entry does not use the approved Clang binary")
         _validate_flags(args)
-        if args.count(FRAME_POINTERS) != 1 or args.count("-g") < 1 or "-c" not in args:
-            raise DiagnosticBuildError(f"Missing frame-pointer/debug/compile flags in {rel}")
-        if "-o" not in args:
-            raise DiagnosticBuildError(f"No object output in compile command {rel}")
-        out = str(Path(row["directory"]) / args[args.index("-o") + 1])
+        if "-c" not in args:
+            raise DiagnosticBuildError(f"Missing compile flag in {rel}")
+        if args.count(FRAME_POINTERS) != 1 or args.count("-g") < 1:
+            raise DiagnosticBuildError(f"Missing frame-pointer/debug flags in {rel}")
+        if args.count("-o") != 1 or args.index("-o") + 1 >= len(args):
+            raise DiagnosticBuildError(f"Expected one object output in compile command {rel}")
+        directory = Path(row["directory"]).resolve(strict=True)
+        build_root = build_dir.resolve(strict=True)
+        if not directory.is_relative_to(build_root):
+            raise DiagnosticBuildError("Compile command working directory escapes the diagnostic build")
+        object_path = Path(args[args.index("-o") + 1])
+        if not object_path.is_absolute():
+            object_path = directory / object_path
+        object_path = object_path.resolve(strict=False)
+        if not object_path.is_relative_to(build_root):
+            raise DiagnosticBuildError("Compile object output escapes the diagnostic build")
+        out = str(object_path)
         if out in outputs:
             raise DiagnosticBuildError("Duplicate object output path")
         outputs.add(out)
-        seen[rel] = {"source": rel, "argv": args, "directory": row["directory"], "object_path": out}
+        seen[rel] = {"source": rel, "argv": args, "directory": str(directory), "object_path": out}
     if set(seen) != EXPECTED_SOURCES:
         raise DiagnosticBuildError(f"Source set mismatch; missing={sorted(EXPECTED_SOURCES-set(seen))}")
     return [seen[name] for name in sorted(seen)]
@@ -283,7 +315,10 @@ def _verify_cache(path: Path, compiler: Path) -> dict[str, str]:
             raise DiagnosticBuildError(f"CMake cache mismatch for {key}: {values.get(key)!r}")
     if values.get("CMAKE_C_COMPILER_LAUNCHER", "") or values.get("CMAKE_C_COMPILER_ARG1", ""):
         raise DiagnosticBuildError("Compiler launcher or argument override is not permitted")
-    flags = values.get("CMAKE_C_FLAGS", "").split()
+    try:
+        flags = shlex.split(values.get("CMAKE_C_FLAGS", ""), posix=True)
+    except ValueError as exc:
+        raise DiagnosticBuildError("CMake C flags are malformed") from exc
     _validate_flags(flags)
     if flags.count(FRAME_POINTERS) != 1 or flags.count("-g") != 1:
         raise DiagnosticBuildError("CMake cache lost required frame-pointer/debug flags")
@@ -421,7 +456,13 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
     runtimes = {}
     for name in ("libclang_rt.asan-x86_64.a", "libclang_rt.ubsan_standalone-x86_64.a"):
         runtime = Path(_tool_text(compiler, f"-print-file-name={name}", env=env)).resolve(strict=True)
-        runtimes[name] = {"path":str(runtime), "sha256":_hash_file(runtime)[0]}
+        runtime_digest, runtime_size = _hash_file(runtime)
+        runtimes[name] = {
+            "path": str(runtime),
+            "sha256": runtime_digest,
+            "size_bytes": runtime_size,
+            "package": _package(runtime, env),
+        }
     zlib_text = ZLIB_HEADER.read_text(encoding="utf-8")
     zlib_match = re.search(r'^\s*#\s*define\s+ZLIB_VERSION\s+"([^"]+)"', zlib_text, re.M)
     if not zlib_match or zlib_match.group(1) != ZLIB_VERSION:
@@ -465,7 +506,7 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
             if result["timed_out"] or result["return_code"] != 0 or result["capture_errors"]:
                 raise DiagnosticBuildError(f"{label} step failed: {result}")
         compile_db, cache = build/"compile_commands.json", build/"CMakeCache.txt"
-        commands = _verify_compile_commands(source, compile_db, compiler)
+        commands = _verify_compile_commands(source, compile_db, compiler, build)
         metadata["verification"]["compile_commands"] = commands
         metadata["verification"]["cmake_cache"] = _verify_cache(cache, compiler)
         archive = build/"libpng16.a"

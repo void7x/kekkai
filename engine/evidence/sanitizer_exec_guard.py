@@ -128,12 +128,29 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="ascii").strip()
 
 
+def read_cgroup_counters(path: Path) -> dict[str, int] | dict[str, Any]:
+    try:
+        if path.stat(follow_symlinks=False).st_size > 16384:
+            return {"available": False, "detail": "counter file exceeds the 16 KiB read limit"}
+        values: dict[str, int] = {}
+        for line in read_text(path).splitlines():
+            fields = line.split()
+            if len(fields) != 2 or not fields[1].isdecimal():
+                return {"available": False, "detail": "counter file has an unexpected format"}
+            values[fields[0]] = int(fields[1])
+        return values
+    except OSError as exc:
+        return {"available": False, "detail": f"{type(exc).__name__}: {exc}"[:256]}
+
+
 def verify_limits() -> dict[str, Any]:
     if os.getuid() == 0 or os.geteuid() == 0:
         raise ValueError("The guard must never run as root")
     proc_status = read_proc_status()
-    if int(proc_status.get("CapEff", "1"), 16) != 0:
-        raise ValueError("Dynamic workload identity has effective Linux capabilities")
+    capability_fields = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+    for field in capability_fields:
+        if int(proc_status.get(field, "1"), 16) != 0:
+            raise ValueError(f"Dynamic workload identity has non-zero {field}")
     if proc_status.get("NoNewPrivs") != "1":
         raise ValueError("NoNewPrivs is not active")
 
@@ -161,8 +178,11 @@ def verify_limits() -> dict[str, Any]:
         raise ValueError("memory.swap.max is not zero")
     if pids_max <= 0 or pids_max > 32:
         raise ValueError("pids.max does not enforce the requested process ceiling")
-    if cpu_quota <= 0 or cpu_period <= 0 or cpu_quota * 100 > cpu_period * 60:
-        raise ValueError("cpu.max does not enforce a maximum of 60% of one CPU")
+    if (
+        cpu_quota <= 0 or cpu_period != 100000
+        or cpu_quota * 100 > cpu_period * 60
+    ):
+        raise ValueError("cpu.max does not enforce the approved 60% quota with a 100 ms period")
 
     address_limit = resource.getrlimit(resource.RLIMIT_AS)
     core_limit = resource.getrlimit(resource.RLIMIT_CORE)
@@ -175,6 +195,7 @@ def verify_limits() -> dict[str, Any]:
         "uid": os.getuid(),
         "gid": os.getgid(),
         "cap_eff": proc_status.get("CapEff"),
+        "cap_bnd": proc_status.get("CapBnd"),
         "no_new_privs": proc_status.get("NoNewPrivs"),
         "cgroup": cgroup,
         "cgroup_mount_options": list(mount_options),
@@ -183,6 +204,11 @@ def verify_limits() -> dict[str, Any]:
         "pids_max": pids_max,
         "cpu_quota": cpu_quota,
         "cpu_period": cpu_period,
+        "memory_current": read_text(base / "memory.current"),
+        "memory_events": read_cgroup_counters(base / "memory.events"),
+        "memory_events_local": read_cgroup_counters(base / "memory.events.local"),
+        "cpu_stat": read_cgroup_counters(base / "cpu.stat"),
+        "pids_current": read_text(base / "pids.current"),
         "rlimit_as": list(address_limit),
         "rlimit_core": list(core_limit),
     }
@@ -238,12 +264,31 @@ def main() -> int:
     parser.add_argument("--expected-input-sha256", required=True)
     parser.add_argument("--expected-input-size", required=True, type=int)
     parser.add_argument("--expected-harness-sha256", required=True)
+    parser.add_argument("--harness-path", required=True)
     args = parser.parse_args()
 
     runtime_raw = os.environ.get("RUNTIME_DIRECTORY")
     credentials_raw = os.environ.get("CREDENTIALS_DIRECTORY")
     runtime = Path(runtime_raw) if runtime_raw else None
     if runtime is None or credentials_raw is None:
+        return 70
+    runtime_link_info = runtime.lstat()
+    if stat.S_ISLNK(runtime_link_info.st_mode):
+        resolved_runtime = runtime.resolve(strict=True)
+        expected_runtime = Path("/run/private") / runtime.name
+        if resolved_runtime != expected_runtime:
+            return 70
+        if runtime_link_info.st_uid != 0:
+            return 70
+        runtime_info = resolved_runtime.stat(follow_symlinks=False)
+    else:
+        resolved_runtime = runtime
+        runtime_info = runtime_link_info
+    if (
+        not stat.S_ISDIR(runtime_info.st_mode)
+        or runtime_info.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_info.st_mode) != 0o700
+    ):
         return 70
 
     status: dict[str, Any] = {
@@ -258,6 +303,8 @@ def main() -> int:
         "stdout": {"capture_state": "not_started", "truncated": False, "retained_bytes": 0, "detail": None},
         "stderr": {"capture_state": "not_started", "truncated": False, "retained_bytes": 0, "detail": None},
         "resource_observation": {},
+        "harness_argv": None,
+        "harness_environment": None,
         "detail": None,
     }
     process: subprocess.Popen | None = None
@@ -279,10 +326,13 @@ def main() -> int:
         resource_observation = verify_limits()
         status["resource_observation"] = resource_observation
 
-        harness_hash, harness_size = hash_regular_file(HARNESS_PATH, 32 * 1024 * 1024)
+        harness_path = Path(args.harness_path)
+        if harness_path != runtime / "kekkai_png_harness":
+            raise ValueError("Harness path is not the fixed file inside this attempt's RuntimeDirectory")
+        harness_hash, harness_size = hash_regular_file(str(harness_path), 32 * 1024 * 1024)
         if harness_hash != args.expected_harness_sha256:
             raise ValueError("The read-only harness binary digest does not match the registered build")
-        harness_info = os.stat(HARNESS_PATH, follow_symlinks=False)
+        harness_info = os.stat(harness_path, follow_symlinks=False)
         if not (harness_info.st_mode & stat.S_IXUSR or harness_info.st_mode & stat.S_IXOTH):
             raise ValueError("The harness binary is not executable")
 
@@ -308,11 +358,14 @@ def main() -> int:
             "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1:abort_on_error=1:symbolize=0",
             "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
         }
-        child_argv = [HARNESS_PATH, str(credential_path)]
+        child_argv = [str(harness_path), str(credential_path)]
+        status["harness_argv"] = child_argv
+        status["harness_environment"] = child_env
+        write_status(runtime, status)
         try:
             process = subprocess.Popen(
                 child_argv,
-                cwd="/run/kekkai-harness",
+                cwd=str(runtime),
                 env=child_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -418,12 +471,33 @@ def main() -> int:
         write_status(runtime, status)
         return 0
     except BaseException as exc:
-        status["detail"] = f"Guard preflight failed: {type(exc).__name__}: {exc}"[:1024]
-        status["guard_state"] = "preflight_blocked"
-        status["execution_status"] = "blocked_preflight"
-        status["harness_exec_succeeded"] = False
-        status["execution_started_at"] = None
-        status["execution_finished_at"] = None
+        status["detail"] = f"Guard failure: {type(exc).__name__}: {exc}"[:1024]
+        if status["harness_exec_succeeded"]:
+            # Never rewrite a post-exec failure as a preflight refusal.
+            status["guard_state"] = "post_exec_failure"
+            status["execution_status"] = "interrupted"
+            status["execution_started_at"] = status["execution_started_at"] or utc_now()
+            status["execution_finished_at"] = utc_now()
+            for key in ("stdout", "stderr"):
+                current = status.get(key, {})
+                if current.get("capture_state") == "not_started":
+                    current["capture_state"] = "read_failed"
+                    current["detail"] = "Guard failed after harness exec; final capture state unavailable."
+                status[key] = current
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except BaseException:
+                    pass
+        else:
+            status["guard_state"] = "preflight_blocked"
+            status["execution_status"] = "blocked_preflight"
+            status["execution_started_at"] = None
+            status["execution_finished_at"] = None
         try:
             write_status(runtime, status)
         except OSError:
