@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import sqlite3
@@ -1298,8 +1299,26 @@ def collect_sanitizer_evidence(
                 unit=None, recovery_path=attempt_dir, runtime_observation=runtime_observation,
             )
 
+        stage_prefix = "kekkai-p3-03-stage-" + run_uid.replace("-", "")
+        root_input = Path("/run") / (stage_prefix + "-input")
+        root_harness = Path("/run") / (stage_prefix + "-harness")
+        root_guard = Path("/run") / (stage_prefix + "-guard")
+        root_staged_files: list[Path] = []
+        registered_harness_sha256 = str(context["diagnostic_harness_binary_sha256"])
+        guard_sha256, _ = _hash_regular_file(guard, 1024 * 1024)
+        for source_path, staged_path, digest, maximum in (
+            (input_path, root_input, input_digest, MAX_INPUT_BYTES),
+            (harness, root_harness, registered_harness_sha256, 32 * 1024 * 1024),
+            (guard, root_guard, guard_sha256, 1024 * 1024),
+        ):
+            _stage_root_file(source_path, staged_path, digest, maximum)
+            root_staged_files.append(staged_path)
+            manifest["root_staged_files"] = [str(item) for item in root_staged_files]
+            _write_manifest(attempt_dir, manifest)
+
         argv = _systemd_run_argv(
-            unit, runtime_name, input_path, harness, guard, input_digest, input_size
+            unit, runtime_name, root_input, root_harness, root_guard,
+            input_digest, input_size, registered_harness_sha256,
         )
         manifest.update({
             "state": "service_launch_requested",
@@ -1308,65 +1327,178 @@ def collect_sanitizer_evidence(
             "command": argv,
             "environment": run_environment,
             "resource_policy": resource_policy,
+            "preexec_manager_authorization_required": True,
         })
         _write_manifest(attempt_dir, manifest)
 
+        systemd_process: subprocess.Popen | None = None
         systemd_result: subprocess.CompletedProcess | None = None
         interrupted = False
         runner_error: str | None = None
+        launch_requested = False
+        manager_authorized = False
+        preexec_properties: dict[str, str] = {}
+        preexec_verification: dict[str, Any] = {
+            "passed": False,
+            "issues": ["Manager properties have not yet been inspected."],
+        }
         try:
-            systemd_result = subprocess.run(
+            launch_requested = True
+            systemd_process = subprocess.Popen(
                 [str(SUDO), "-n", *argv],
                 cwd="/",
                 env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=12,
-                check=False,
                 shell=False,
                 close_fds=True,
+                bufsize=0,
             )
+            ready_status, ready_error = _wait_for_guard_ready(
+                systemd_process, runtime_dir, timeout=3.0
+            )
+            if ready_status is None or ready_status.get("guard_state") != "awaiting_manager_authorization":
+                runner_error = ready_error or "Guard did not reach the pre-exec authorization barrier."
+            else:
+                preexec_properties = _systemd_show(unit)
+                preexec_verification = _verify_systemd_properties(preexec_properties)
+                if "show_error" in preexec_properties:
+                    preexec_verification = {
+                        "passed": False,
+                        "issues": ["System-manager inspection failed before harness authorization."],
+                    }
+                if preexec_verification["passed"]:
+                    try:
+                        if systemd_process.stdin is None:
+                            raise BrokenPipeError("systemd-run stdin pipe is unavailable")
+                        systemd_process.stdin.write(b"\\x01")
+                        systemd_process.stdin.flush()
+                        systemd_process.stdin.close()
+                        manager_authorized = True
+                    except (BrokenPipeError, OSError, ValueError) as exc:
+                        runner_error = f"Could not deliver manager authorization: {type(exc).__name__}: {exc}"
+                else:
+                    runner_error = (
+                        "System-manager property verification failed before harness authorization: "
+                        + "; ".join(preexec_verification["issues"])
+                    )
+            if not manager_authorized:
+                if systemd_process.stdin is not None and not systemd_process.stdin.closed:
+                    systemd_process.stdin.close()
+                _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
+            try:
+                out, err = systemd_process.communicate(timeout=12)
+            except subprocess.TimeoutExpired:
+                runner_error = runner_error or "systemd-run did not finish within the bounded service wait."
+                _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
+                try:
+                    out, err = systemd_process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    systemd_process.kill()
+                    out, err = systemd_process.communicate(timeout=2)
+            systemd_result = subprocess.CompletedProcess(
+                [str(SUDO), "-n", *argv], systemd_process.returncode, out, err
+            )
+            if systemd_result.returncode != 0 and runner_error is None:
+                runner_error = (
+                    "systemd-run failed: "
+                    + systemd_result.stderr.decode("utf-8", errors="replace")[:1024]
+                )
         except KeyboardInterrupt:
             interrupted = True
-            runner_error = "Collector received an interruption while the system service was running."
+            runner_error = "Collector received SIGINT/SIGTERM while the system service was active."
+            if systemd_process is not None and systemd_process.stdin is not None:
+                try:
+                    systemd_process.stdin.close()
+                except OSError:
+                    pass
             _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
         except subprocess.TimeoutExpired:
             runner_error = "systemd-run did not finish within the bounded service wait."
             _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
         except OSError as exc:
-            runner_error = f"Cannot start systemd service: {type(exc).__name__}: {exc}"
+            runner_error = f"Cannot start or communicate with systemd service: {type(exc).__name__}: {exc}"
+        finally:
+            if systemd_process is not None and systemd_process.poll() is None:
+                if systemd_process.stdin is not None and not systemd_process.stdin.closed:
+                    try:
+                        systemd_process.stdin.close()
+                    except OSError:
+                        pass
+                try:
+                    _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
+                except SanitizerCollectionError:
+                    pass
+                try:
+                    out, err = systemd_process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    systemd_process.kill()
+                    out, err = systemd_process.communicate(timeout=2)
+                if systemd_result is None:
+                    systemd_result = subprocess.CompletedProcess(
+                        [str(SUDO), "-n", *argv], systemd_process.returncode, out, err
+                    )
 
-        initial_properties = _systemd_show(unit)
-        systemd_policy_verification = _verify_systemd_properties(initial_properties)
+        initial_properties = preexec_properties or _systemd_show(unit)
+        systemd_policy_verification = preexec_verification
         cleanup_ok, cleanup_detail, final_properties = _stop_and_verify_service(unit, initial_properties)
         runtime_probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=3)
         runtime_exists = runtime_probe.returncode == 0
-        guard_status = _read_guard_status(runtime_dir) if runtime_exists else None
+        runtime_probe_failed = runtime_probe.returncode not in (0, 1)
+        if runtime_probe_failed:
+            runner_error = runner_error or "Could not establish whether the attempt RuntimeDirectory exists."
+        guard_status: dict[str, Any] | None = None
+        if runtime_exists:
+            try:
+                guard_status = _read_guard_status(runtime_dir)
+            except SanitizerCollectionError as exc:
+                runner_error = runner_error or str(exc)
 
         stdout_bytes: bytes | None = None
         stderr_bytes: bytes | None = None
         stdout_stage: Path | None = None
         stderr_stage: Path | None = None
+        stdout_copy_error: str | None = None
+        stderr_copy_error: str | None = None
         if runtime_exists:
             try:
                 stdout_bytes, stdout_stage = _copy_service_stream(runtime_dir, "stdout.bin", attempt_dir)
+            except SanitizerCollectionError as exc:
+                stdout_copy_error = str(exc)
+            try:
                 stderr_bytes, stderr_stage = _copy_service_stream(runtime_dir, "stderr.bin", attempt_dir)
             except SanitizerCollectionError as exc:
-                runner_error = runner_error or str(exc)
-
-        if not runtime_exists:
+                stderr_copy_error = str(exc)
+        guard_exec_succeeded = bool(
+            guard_status and guard_status.get("harness_exec_succeeded") is True
+        )
+        runtime_copy_complete = (
+            guard_status is not None
+            and (not guard_exec_succeeded or (stdout_stage is not None and stderr_stage is not None))
+        )
+        if not runtime_exists and not runtime_probe_failed:
             runtime_cleanup_ok, runtime_cleanup_detail = True, None
-        elif "show_error" in initial_properties:
-            runtime_cleanup_ok = False
-            runtime_cleanup_detail = "RuntimeDirectory exists but the transient service properties could not be inspected."
-        elif cleanup_ok:
+        elif cleanup_ok and runtime_copy_complete:
             runtime_cleanup_ok, runtime_cleanup_detail = _clean_service_runtime(unit)
         else:
             runtime_cleanup_ok = False
-            runtime_cleanup_detail = "RuntimeDirectory retained because whole-service cleanup was not verified."
-        cleanup_ok = cleanup_ok and runtime_cleanup_ok
-        cleanup_detail = cleanup_detail or runtime_cleanup_detail
+            runtime_cleanup_detail = (
+                "RuntimeDirectory retained because stream copies or whole-service cleanup "
+                "could not be verified."
+            )
+        root_stage_cleanup_ok = False
+        root_stage_cleanup_detail: str | None = None
+        if cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed:
+            root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(root_staged_files)
+        else:
+            root_stage_cleanup_detail = "Root-owned staged files retained until service cleanup is verified."
+        cleanup_ok = cleanup_ok and runtime_cleanup_ok and root_stage_cleanup_ok
+        cleanup_detail = cleanup_detail or runtime_cleanup_detail or root_stage_cleanup_detail
+        if stdout_copy_error:
+            runner_error = runner_error or "stdout recovery copy failed: " + stdout_copy_error
+        if stderr_copy_error:
+            runner_error = runner_error or "stderr recovery copy failed: " + stderr_copy_error
 
         if guard_status is None:
             result_status = "blocked_preflight"
