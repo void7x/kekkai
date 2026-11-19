@@ -1150,6 +1150,43 @@ def _wait_for_guard_ready(
     return None, last_error or f"Guard did not reach {expected_state!r} before the deadline."
 
 
+def _wait_for_guard_completion(
+    process: subprocess.Popen,
+    runtime_dir: Path,
+    timeout: float = SERVICE_RUNTIME_SECONDS + 1.0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Wait for the guard's durable terminal status while the manager retains the unit."""
+    terminal_states = {
+        "preflight_blocked",
+        "staging_authorization_refused",
+        "manager_authorization_refused",
+        "launch_failed",
+        "finished",
+        "post_exec_failure",
+    }
+    deadline = time.monotonic() + timeout
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            try:
+                return _read_guard_status(runtime_dir), None
+            except SanitizerCollectionError as exc:
+                return None, f"systemd-run exited before a readable terminal guard status: {exc}"
+        probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=1)
+        if probe.returncode == 0:
+            try:
+                status = _read_guard_status(runtime_dir)
+            except SanitizerCollectionError as exc:
+                last_error = str(exc)
+                status = None
+            if status is not None and status.get("guard_state") in terminal_states:
+                return status, None
+        elif probe.returncode not in (1,):
+            last_error = "Could not inspect the attempt RuntimeDirectory while waiting for guard completion."
+        time.sleep(0.05)
+    return None, last_error or "Guard did not reach a terminal state before the bounded manager-stop deadline."
+
+
 def _copy_service_stream(
     runtime_dir: Path,
     name: str,
@@ -1625,9 +1662,18 @@ def collect_sanitizer_evidence(
             if not manager_authorized:
                 if systemd_process.stdin is not None and not systemd_process.stdin.closed:
                     systemd_process.stdin.close()
-                _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
+            else:
+                _, completion_error = _wait_for_guard_completion(
+                    systemd_process, runtime_dir, timeout=SERVICE_RUNTIME_SECONDS + 1.0
+                )
+                if completion_error:
+                    runner_error = runner_error or completion_error
+            # RemainAfterExit retains the unit for inspection; explicitly stop
+            # this attempt-owned unit to release systemd-run --pipe before reading
+            # its captured diagnostics and the preserved runtime files.
+            _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
             try:
-                out, err = systemd_process.communicate(timeout=12)
+                out, err = systemd_process.communicate(timeout=7)
             except subprocess.TimeoutExpired:
                 runner_error = runner_error or "systemd-run did not finish within the bounded service wait."
                 _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
