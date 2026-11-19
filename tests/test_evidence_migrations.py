@@ -25,11 +25,11 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_initial_migration_and_idempotent_rerun(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root), 1)
-            self.assertEqual(run_migrations(self.root), 1)
+            self.assertEqual(run_migrations(self.root), 2)
+            self.assertEqual(run_migrations(self.root), 2)
         connection = sqlite3.connect(self.store.database_path)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (1,))
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (2,))
             tables = {
                 row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
@@ -37,11 +37,14 @@ class EvidenceMigrationTests(unittest.TestCase):
             }
             self.assertEqual(
                 tables,
-                {"schema_migrations", "targets", "target_versions", "builds", "campaigns", "artifacts", "observations"},
+                {
+                    "schema_migrations", "targets", "target_versions", "builds",
+                    "campaigns", "artifacts", "observations", "sanitizer_runs",
+                },
             )
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
-            self.assertEqual(connection.execute("SELECT count(*) FROM schema_migrations").fetchone(), (1,))
+            self.assertEqual(connection.execute("SELECT count(*) FROM schema_migrations").fetchone(), (2,))
         finally:
             connection.close()
 
@@ -62,10 +65,10 @@ class EvidenceMigrationTests(unittest.TestCase):
     def test_migration_failure_rolls_back_ddl_and_creates_backup(self):
         with patch("os.geteuid", return_value=1000):
             run_migrations(self.root, min_free_reserve_bytes=0)
-        sql_path = Path(self.temp.name) / "002_failure.sql"
+        sql_path = Path(self.temp.name) / "003_failure.sql"
         sql = "CREATE TABLE migration_probe(value INTEGER);\nINSERT INTO missing_table VALUES (1);\n"
         sql_path.write_text(sql, encoding="utf-8")
-        migration = Migration(2, "002_failure", sql_path, hashlib.sha256(sql.encode()).hexdigest())
+        migration = Migration(3, "003_failure", sql_path, hashlib.sha256(sql.encode()).hexdigest())
         with patch("os.geteuid", return_value=1000), patch.object(
             migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)
         ):
@@ -73,7 +76,7 @@ class EvidenceMigrationTests(unittest.TestCase):
                 run_migrations(self.root, min_free_reserve_bytes=0)
         connection = sqlite3.connect(self.store.database_path)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (1,))
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (2,))
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migration_probe'"
             ).fetchone())
@@ -99,7 +102,7 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_empty_existing_migration_history_is_rejected(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root), 1)
+            self.assertEqual(run_migrations(self.root), 2)
         connection = sqlite3.connect(self.store.database_path, isolation_level=None)
         try:
             connection.execute("DELETE FROM schema_migrations")
@@ -111,11 +114,11 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_backup_capacity_is_checked_before_online_backup(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root), 1)
-        sql_path = Path(self.temp.name) / "002_capacity.sql"
+            self.assertEqual(run_migrations(self.root), 2)
+        sql_path = Path(self.temp.name) / "003_capacity.sql"
         sql = "CREATE TABLE capacity_probe(value INTEGER);\n"
         sql_path.write_text(sql, encoding="utf-8")
-        migration = Migration(2, "002_capacity", sql_path, hashlib.sha256(sql.encode()).hexdigest())
+        migration = Migration(3, "003_capacity", sql_path, hashlib.sha256(sql.encode()).hexdigest())
 
         class LowCapacity:
             f_bavail = 1
@@ -132,10 +135,10 @@ class EvidenceMigrationTests(unittest.TestCase):
     def test_backup_failure_cleans_sidecar_temporary_and_unpublished_backup(self):
         with patch("os.geteuid", return_value=1000):
             self.assertEqual(run_migrations(self.root, min_free_reserve_bytes=0), 1)
-        sql_path = Path(self.temp.name) / "002_sidecar.sql"
+        sql_path = Path(self.temp.name) / "003_sidecar.sql"
         sql = "CREATE TABLE sidecar_probe(value INTEGER);\n"
         sql_path.write_text(sql, encoding="utf-8")
-        migration = Migration(2, "002_sidecar", sql_path, hashlib.sha256(sql.encode()).hexdigest())
+        migration = Migration(3, "003_sidecar", sql_path, hashlib.sha256(sql.encode()).hexdigest())
         with patch("os.geteuid", return_value=1000), patch(
             "engine.evidence.migrations.os.write", side_effect=OSError("simulated sidecar write failure")
         ), patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS + (migration,)):
@@ -154,7 +157,7 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_applied_migration_file_drift_fails_closed(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root), 1)
+            self.assertEqual(run_migrations(self.root), 2)
         changed_sql = Path(self.temp.name) / "001_changed.sql"
         changed_sql.write_text("CREATE TABLE edited_after_apply(value INTEGER);\n", encoding="utf-8")
         changed = Migration(
@@ -164,7 +167,7 @@ class EvidenceMigrationTests(unittest.TestCase):
             migrations.MIGRATIONS[0].checksum_sha256,
         )
         with patch("os.geteuid", return_value=1000), patch.object(
-            migrations, "MIGRATIONS", (changed,)
+            migrations, "MIGRATIONS", (changed, migrations.MIGRATIONS[1])
         ):
             with self.assertRaisesRegex(MigrationError, "checksum mismatch"):
                 run_migrations(self.root)
