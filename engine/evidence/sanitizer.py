@@ -40,7 +40,7 @@ SYSTEMCTL = Path("/usr/bin/systemctl")
 SUDO = Path("/usr/bin/sudo")
 PYTHON = Path("/usr/bin/python3")
 GUARD_SOURCE = Path(__file__).with_name("sanitizer_exec_guard.py")
-MANAGER_AUTHORIZATION_TOKEN = b"\\x01"
+MANAGER_AUTHORIZATION_TOKEN = b"\x01"
 
 
 class SanitizerCollectionError(RuntimeError):
