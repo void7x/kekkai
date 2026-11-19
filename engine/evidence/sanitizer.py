@@ -1181,6 +1181,7 @@ def collect_sanitizer_evidence(
     service_finalization_attempted = False
     service_cleanup_confirmed = False
     root_staged_files: list[Path] = []
+    root_stage_cleanup_finalized = False
     previous_sigterm_handler: Any = None
     attempt_manifest: dict[str, Any] | None = None
     try:
@@ -1686,6 +1687,14 @@ def collect_sanitizer_evidence(
         else:
             root_stage_cleanup_ok = False
             root_stage_cleanup_detail = "Root-owned staged files retained because service or identity verification was incomplete."
+        root_stage_cleanup_finalized = True
+        if root_stage_cleanup_ok:
+            manifest.update({"root_staged_files": [], "root_stage_cleanup_state": "complete"})
+        else:
+            manifest.update({
+                "root_stage_cleanup_state": "failed",
+                "root_stage_cleanup_detail": root_stage_cleanup_detail,
+            })
         cleanup_ok = cleanup_ok and root_stage_cleanup_ok
         cleanup_detail = cleanup_detail or root_stage_cleanup_detail
 
@@ -1940,7 +1949,7 @@ def collect_sanitizer_evidence(
                         pass
         # Root-owned staged files are removed only after the attempt service is
         # positively absent or its complete cgroup is known empty.
-        if root_staged_files and (not launch_requested or service_cleanup_confirmed):
+        if root_staged_files and not root_stage_cleanup_finalized and (not launch_requested or service_cleanup_confirmed):
             try:
                 removed, removal_detail = _remove_root_staged_files(root_staged_files)
                 if not removed and attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
