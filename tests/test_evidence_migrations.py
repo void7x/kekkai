@@ -134,7 +134,7 @@ class EvidenceMigrationTests(unittest.TestCase):
 
     def test_backup_failure_cleans_sidecar_temporary_and_unpublished_backup(self):
         with patch("os.geteuid", return_value=1000):
-            self.assertEqual(run_migrations(self.root, min_free_reserve_bytes=0), 1)
+            self.assertEqual(run_migrations(self.root, min_free_reserve_bytes=0), 2)
         sql_path = Path(self.temp.name) / "003_sidecar.sql"
         sql = "CREATE TABLE sidecar_probe(value INTEGER);\n"
         sql_path.write_text(sql, encoding="utf-8")
