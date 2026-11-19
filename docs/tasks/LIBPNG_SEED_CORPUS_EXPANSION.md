@@ -1,6 +1,6 @@
 # Libpng seed-corpus expansion
 
-**Status:** Descriptor-anchored preparation fix committed; owner-side WSL revalidation pending. Earlier WSL corpus preparation and native coverage results are recorded below as owner-reported results, not as validation of the latest fix.
+**Status:** Descriptor-anchored preparation fix committed at `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`; owner-side WSL revalidation of that exact commit is pending. Earlier native corpus and coverage results are summarized in [PR #11](https://github.com/void7x/kekkai/pull/11) and are not validation of the latest preparation fix.
 **Base:** `development` at `64db5c3050fd68ac601dd189b89b1c6e3f574e0e`
 **Branch:** `feature/libpng-seed-corpus`
 
@@ -65,6 +65,20 @@ The coverage report separates the original ten-seed baseline from the eight supp
 
 A zero incremental edge count is a failed improvement check, not a reason to run another campaign anyway.
 
-## 6. Next gate
+## 5.1 Earlier native validation record
 
-A new bounded campaign is a separate mandatory owner-approval stop point under `docs/WORKFLOW_DECISIONS.md`. Do not launch one solely because the generator or unit tests pass. First review the actual native validation report and seed manifest. If the incremental coverage gate passes, request approval for one bounded campaign using the expanded corpus. The importer still accepts only genuine AFL++ crash/hang outputs; queue entries are not observations.
+The earlier owner-reported native run prepared the expanded corpus before the descriptor-anchored preparation changes in commit `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`. The report is summarized in [PR #11](https://github.com/void7x/kekkai/pull/11):
+
+- Prepared corpus: 18 seeds, 268,238 bytes.
+- Manifest SHA-256: `458db92e1fe7d4f86bb016abd9ce0d94faadc69c7a1a754fe86ac55579e8d0c7`.
+- Harness smoke: 21/21 passed.
+- AFL-showmap: all 18 seed maps passed; Adam7 repeatability passed.
+- Supplemental seeds contributed 315 additional AFL map locations beyond the original baseline.
+
+These results describe the corpus and coverage validation performed before the latest descriptor-anchoring fix. They do **not** establish that the preparation and cleanup changes in commit `188c27ed6ca9e36eae427ad50985761bf9ecbbb5` were exercised. Exact-commit owner-side WSL revalidation remains pending.
+
+## 6. Current gate
+
+The owner-approved 300-second AFL++ campaign using the expanded corpus has already completed as `campaign-20261119T162025Z-772736bb823d`. It produced no crash or hang observations. AFL queue entries remain inputs, not observations.
+
+No additional fuzzing campaign is authorized by this task. The remaining gate is owner-side WSL revalidation of the descriptor-anchored preparation fix at commit `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`. The importer must continue accepting only genuine AFL++ crash/hang outputs; do not reclassify queue entries.
