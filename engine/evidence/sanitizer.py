@@ -564,53 +564,6 @@ def _sudo(argv: list[str], *, timeout: float = 5, capture: bool = True) -> subpr
         raise SanitizerCollectionError(f"Cannot execute privileged command {argv[0]}: {exc}") from exc
 
 
-def _read_service_file(path: Path, maximum: int) -> bytes | None:
-    reader = r'''
-import os, stat, sys
-path = sys.argv[1]
-maximum = int(sys.argv[2])
-fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-try:
-    before = os.fstat(fd)
-    if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600:
-        raise SystemExit(21)
-    if before.st_uid == 0 or before.st_nlink != 1 or before.st_size < 0 or before.st_size > maximum:
-        raise SystemExit(22)
-    chunks = []
-    total = 0
-    while True:
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > maximum:
-            raise SystemExit(23)
-        chunks.append(chunk)
-    after = os.fstat(fd)
-    identity = lambda x: (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
-    if identity(before) != identity(after) or total != before.st_size:
-        raise SystemExit(24)
-    sys.stdout.buffer.write(b"".join(chunks))
-finally:
-    os.close(fd)
-'''
-    result = _sudo([str(PYTHON), "-c", reader, str(path), str(maximum)], timeout=5)
-    if result.returncode == 1:
-        return None
-    if result.returncode != 0:
-        raise SanitizerCollectionError(
-            f"Cannot safely read systemd service output {path} (exit {result.returncode})."
-        )
-    return result.stdout
-
-
-_STAGED_PERMISSION_POLICY = {
-    "input": (0o400, 0o400),
-    "harness": (0o500, 0o500),
-    "guard": (0o444, 0o400),
-}
-
-
 def _staged_permissions(role: str) -> tuple[int, int]:
     """Return (root bootstrap mode, post-handoff DynamicUser mode) for a staged role."""
     try:
@@ -1401,19 +1354,6 @@ def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tu
     return ordered, "no_signature_observed" if complete else "inconclusive"
 
 
-def _read_guard_status(runtime_dir: Path) -> dict[str, Any] | None:
-    raw = _read_service_file(runtime_dir / "status.json", 64 * 1024)
-    if raw is None:
-        return None
-    try:
-        value = json.loads(raw)
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise SanitizerCollectionError("Guard status file is not valid JSON.") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise SanitizerCollectionError("Guard status file has an unsupported schema.")
-    return value
-
-
 def _wait_for_guard_ready(
     process: subprocess.Popen,
     channel: _GuardEventChannel,
@@ -1435,36 +1375,6 @@ def _wait_for_guard_completion(
     return channel.wait_for_terminal(timeout)
 
 
-
-
-def _copy_service_stream(
-    runtime_dir: Path,
-    name: str,
-    attempt_dir: Path,
-) -> tuple[bytes | None, Path | None]:
-    raw = _read_service_file(runtime_dir / name, MAX_STREAM_BYTES)
-    if raw is None:
-        return None, None
-    stage = attempt_dir / name
-    _write_private_file(stage, raw)
-    return raw, stage
-
-def _copy_service_streams(
-    runtime_dir: Path,
-    attempt_dir: Path,
-) -> tuple[
-    tuple[bytes | None, Path | None, str | None],
-    tuple[bytes | None, Path | None, str | None],
-]:
-    """Attempt both stream copies independently; one failure must not skip the other."""
-    results = []
-    for name in ("stdout.bin", "stderr.bin"):
-        try:
-            raw, stage = _copy_service_stream(runtime_dir, name, attempt_dir)
-            results.append((raw, stage, None))
-        except (SanitizerCollectionError, OSError) as exc:
-            results.append((None, None, f"{type(exc).__name__}: {exc}"))
-    return results[0], results[1]
 
 
 def _stream_state(

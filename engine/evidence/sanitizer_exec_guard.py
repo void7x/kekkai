@@ -1,8 +1,9 @@
 """Trusted pre-exec guard for the fixed P3-03 systemd service.
 
 This program runs inside a DynamicUser system service. It verifies the resource
-boundary before starting the repository-owned harness and captures raw output
-into the service's private RuntimeDirectory.
+boundary before starting the repository-owned harness, then emits framed status
+and output events over the systemd-run control pipe. Trusted status and output
+are never stored in the workload-writable RuntimeDirectory.
 """
 from __future__ import annotations
 

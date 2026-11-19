@@ -36,7 +36,6 @@ from engine.evidence.sanitizer import (
     _close_process_stdin,
     _execution_outcome_unknown,
     _staged_permissions,
-    _copy_service_streams,
     _stop_and_verify_service,
     _wait_for_guard_ready,
     _wait_for_guard_completion,
@@ -786,27 +785,6 @@ class SanitizerMigrationTests(unittest.TestCase):
                 )
             finally:
                 connection.close()
-
-    def test_stream_copy_failure_does_not_skip_the_other_stream(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            runtime = root / "runtime"
-            attempt = root / "attempt"
-            runtime.mkdir()
-            attempt.mkdir()
-            from engine.evidence import sanitizer
-            with patch.object(
-                sanitizer,
-                "_copy_service_stream",
-                side_effect=[
-                    OSError("stdout stage write failed"),
-                    (b"stderr", attempt / "stderr.bin"),
-                ],
-            ) as copy:
-                stdout, stderr = _copy_service_streams(runtime, attempt)
-            self.assertEqual(copy.call_count, 2)
-            self.assertEqual(stdout, (None, None, "OSError: stdout stage write failed"))
-            self.assertEqual(stderr, (b"stderr", attempt / "stderr.bin", None))
 
     def test_wait_for_guard_ready_requires_the_preexec_barrier(self):
         process = SimpleNamespace(poll=lambda: None)
