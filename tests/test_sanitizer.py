@@ -572,12 +572,15 @@ class SanitizerMigrationTests(unittest.TestCase):
                         "run_uid": "-" + str(uuid.uuid4())[1:],
                     }),
                 ]
+                normalized_base = EvidenceRepository._normalize_record(
+                    SANITIZER_RUN_COLUMNS, self._blocked_run_record(ids)
+                )
                 for name, changes in cases:
-                    candidate = self._blocked_run_record(ids)
-                    candidate.update(changes)
-                    values = EvidenceRepository._normalize_record(
-                        SANITIZER_RUN_COLUMNS, candidate
-                    )
+                    values = dict(normalized_base)
+                    for column, value in changes.items():
+                        if column == "sanitizer_families_json":
+                            value = '["address"]'
+                        values[column] = value
                     columns = ", ".join(SANITIZER_RUN_COLUMNS)
                     placeholders = ", ".join("?" for _ in SANITIZER_RUN_COLUMNS)
                     with self.subTest(name=name), self.assertRaises(sqlite3.IntegrityError):
