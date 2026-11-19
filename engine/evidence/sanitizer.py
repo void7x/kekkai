@@ -11,6 +11,7 @@ import signal
 import sqlite3
 import stat
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -371,6 +372,128 @@ finally:
     return result.stdout
 
 
+def _stage_root_file(
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    maximum: int,
+) -> tuple[str, int]:
+    """Create a root-owned immutable copy in /run for a read-only system-service bind."""
+    if (
+        destination.parent != Path("/run")
+        or not destination.name.startswith("kekkai-p3-03-stage-")
+        or not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", destination.name)
+    ):
+        raise SanitizerCollectionError("Invalid private system-service staging destination.")
+    helper = r'''
+import hashlib, os, stat, sys
+source, destination, expected, maximum, owner = sys.argv[1:]
+maximum, owner = int(maximum), int(owner)
+fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+out = None
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != owner:
+        raise RuntimeError("source is not a regular file owned by the invoking user")
+    if before.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("source file is group/world writable")
+    if before.st_size < 0 or before.st_size > maximum:
+        raise RuntimeError("source exceeds the staging size limit")
+    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o444)
+    digest, total = hashlib.sha256(), 0
+    while True:
+        block = os.read(fd, 65536)
+        if not block:
+            break
+        total += len(block)
+        if total > maximum:
+            raise RuntimeError("source grew beyond the staging size limit")
+        digest.update(block)
+        view = memoryview(block)
+        while view:
+            count = os.write(out, view)
+            if count <= 0:
+                raise OSError("short root staging write")
+            view = view[count:]
+    after = os.fstat(fd)
+    identity = lambda x: (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
+    actual = digest.hexdigest()
+    if identity(before) != identity(after) or total != before.st_size:
+        raise RuntimeError("source changed during root staging")
+    if actual != expected:
+        raise RuntimeError("source digest differs from the registered identity")
+    os.fchmod(out, 0o444)
+    os.fsync(out)
+    os.close(out)
+    out = None
+    directory = os.open("/run", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    print(actual + "\\t" + str(total))
+except BaseException:
+    if out is not None:
+        os.close(out)
+    try:
+        os.unlink(destination)
+    except FileNotFoundError:
+        pass
+    raise
+finally:
+    os.close(fd)
+'''
+    result = _sudo(
+        [str(PYTHON), "-c", helper, str(source), str(destination),
+         expected_sha256, str(maximum), str(os.getuid())],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise SanitizerCollectionError(
+            "Cannot create verified root-owned service input: "
+            + result.stderr.decode("utf-8", errors="replace")[:1024]
+        )
+    try:
+        digest, size = result.stdout.decode("ascii").strip().split("\\t", 1)
+        size_value = int(size)
+    except (UnicodeError, ValueError) as exc:
+        raise SanitizerCollectionError("Root staging helper returned malformed identity data.") from exc
+    if digest != expected_sha256 or size_value < 0 or size_value > maximum:
+        raise SanitizerCollectionError("Root staging helper returned an unexpected file identity.")
+    return digest, size_value
+
+
+def _remove_root_staged_files(paths: list[Path]) -> tuple[bool, str | None]:
+    if not paths:
+        return True, None
+    names = [str(path) for path in paths]
+    helper = r'''
+import os, pathlib, stat, sys
+for raw in sys.argv[1:]:
+    path = pathlib.Path(raw)
+    if path.parent != pathlib.Path("/run") or not path.name.startswith("kekkai-p3-03-stage-"):
+        raise RuntimeError("refusing to remove a path outside the P3-03 /run staging namespace")
+    if not path.name.endswith(("-input", "-harness", "-guard")):
+        raise RuntimeError("unexpected P3-03 staging suffix")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        continue
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
+        raise RuntimeError("staging path identity changed; preserving it")
+    path.unlink()
+directory = os.open("/run", os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+'''
+    result = _sudo([str(PYTHON), "-c", helper, *names], timeout=5)
+    if result.returncode != 0:
+        return False, result.stderr.decode("utf-8", errors="replace")[:1024]
+    return True, None
+
+
 def _check_context(
     connection: sqlite3.Connection,
     context: dict[str, object],
@@ -656,7 +779,7 @@ def _diagnostic_capture(raw: bytes | None) -> dict[str, Any] | None:
 
 def _systemd_show(unit: str) -> dict[str, str]:
     properties = (
-        "ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus",
+        "LoadState", "ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus",
         "ExecMainStartTimestamp", "ExecMainExitTimestamp", "MemoryCurrent",
         "MemoryPeak", "MemorySwapCurrent", "CPUUsageNSec", "TasksCurrent",
         "ControlGroup", "Delegate", "User", "Type", "DynamicUser",
@@ -678,43 +801,52 @@ def _systemd_show(unit: str) -> dict[str, str]:
 
 
 def _stop_and_verify_service(unit: str, properties: dict[str, str]) -> tuple[bool, str | None, dict[str, str]]:
-    if "show_error" in properties:
-        return True, None, {"ActiveState": "not-created", "cgroup_populated": "not-created"}
-    detail: str | None = None
+    """Stop the attempt unit and require positive evidence that its subtree is empty."""
     stopped = _sudo([str(SYSTEMCTL), "stop", unit], timeout=7)
+    final = _systemd_show(unit)
+    if final.get("LoadState") == "not-found":
+        # A positive manager response that the unit is absent proves there is no live unit.
+        final["cgroup_populated"] = "not-found"
+        return True, None, final
+    if "show_error" in final:
+        detail = "Final systemd inspection failed; service cleanup is unverified: " + final["show_error"]
+        return False, detail[:1024], final
+    if "show_error" in properties and not final.get("ControlGroup"):
+        detail = "Initial and final systemd inspection could not establish the unit cgroup."
+        return False, detail, final
+
+    detail: str | None = None
     if stopped.returncode != 0:
         detail = stopped.stderr.decode("utf-8", errors="replace")[:1024]
-    final = _systemd_show(unit)
     active = final.get("ActiveState")
     cgroup = properties.get("ControlGroup") or final.get("ControlGroup")
     populated: str | None = None
     if cgroup and cgroup.startswith("/system.slice/") and ".." not in Path(cgroup).parts:
         cgroup_events = Path("/sys/fs/cgroup") / cgroup.lstrip("/") / "cgroup.events"
-        try:
-            event_result = _sudo(
-                [str(PYTHON), "-c",
-                 "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())",
-                 str(cgroup_events)],
-                timeout=3,
-            )
-            if event_result.returncode == 0:
-                for line in event_result.stdout.decode("ascii", errors="replace").splitlines():
-                    if line.startswith("populated "):
-                        populated = line.split()[1]
-                        break
-        except SanitizerCollectionError:
-            pass
-    # systemd may remove an empty service cgroup immediately after stopping it.
+        event_result = _sudo(
+            [str(PYTHON), "-c",
+             "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())",
+             str(cgroup_events)],
+            timeout=3,
+        )
+        if event_result.returncode == 0:
+            for line in event_result.stdout.decode("ascii", errors="replace").splitlines():
+                if line.startswith("populated "):
+                    populated = line.split()[1]
+                    break
     cgroup_path = Path("/sys/fs/cgroup") / str(cgroup or "").lstrip("/")
     cgroup_gone = bool(cgroup) and not cgroup_path.exists()
     okay = stopped.returncode == 0 and active in ("inactive", "failed") and (
         populated == "0" or cgroup_gone
     )
     if not okay and detail is None:
-        detail = f"Service cleanup not verified (ActiveState={active!r}, populated={populated!r})."
+        detail = (
+            "Service cleanup not verified "
+            f"(ActiveState={active!r}, populated={populated!r}, "
+            f"initial_inspection_failed={'show_error' in properties})."
+        )
     final["cgroup_populated"] = populated or ("removed" if cgroup_gone else "unknown")
     return okay, detail, final
-
 
 def _clean_service_runtime(unit: str) -> tuple[bool, str | None]:
     clean = _sudo([str(SYSTEMCTL), "clean", "--what=runtime", unit], timeout=5)
@@ -729,15 +861,17 @@ def _clean_service_runtime(unit: str) -> tuple[bool, str | None]:
 def _systemd_run_argv(
     unit: str,
     runtime_name: str,
-    input_path: Path,
-    harness: Path,
-    guard: Path,
+    input_source: Path,
+    harness_source: Path,
+    guard_source: Path,
     input_sha256: str,
     input_size: int,
+    harness_sha256: str,
 ) -> list[str]:
     runtime_dir = Path("/run") / runtime_name
     guard_dest = runtime_dir / GUARD_DEST_NAME
     harness_dest = runtime_dir / HARNESS_DEST_NAME
+    input_dest = runtime_dir / "input.bin"
     properties = [
         "DynamicUser=yes",
         "NoNewPrivileges=yes",
@@ -762,9 +896,9 @@ def _systemd_run_argv(
         f"RuntimeDirectory={runtime_name}",
         "RuntimeDirectoryMode=0700",
         "RuntimeDirectoryPreserve=yes",
-        f"LoadCredential=input:{input_path}",
-        f"BindReadOnlyPaths={guard}:{guard_dest}",
-        f"BindReadOnlyPaths={harness}:{harness_dest}",
+        f"BindReadOnlyPaths={input_source}:{input_dest}",
+        f"BindReadOnlyPaths={harness_source}:{harness_dest}",
+        f"BindReadOnlyPaths={guard_source}:{guard_dest}",
         f"WorkingDirectory={runtime_dir}",
     ]
     argv = [
@@ -776,14 +910,14 @@ def _systemd_run_argv(
         str(PYTHON), str(guard_dest),
         "--expected-input-sha256", input_sha256,
         "--expected-input-size", str(input_size),
-        "--expected-harness-sha256", _hash_regular_file(harness, 32 * 1024 * 1024)[0],
+        "--expected-harness-sha256", harness_sha256,
         "--harness-path", str(harness_dest),
+        "--input-path", str(input_dest),
     ])
-    for path in (input_path, harness, guard):
-        if ":" in str(path) or "\n" in str(path):
+    for path in (input_source, harness_source, guard_source):
+        if ":" in str(path) or "\\n" in str(path):
             raise SanitizerCollectionError("Systemd source paths may not contain ':' or newline characters.")
     return argv
-
 
 def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tuple[list[str], str]:
     families: set[str] = set()
@@ -824,6 +958,35 @@ def _read_guard_status(runtime_dir: Path) -> dict[str, Any] | None:
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise SanitizerCollectionError("Guard status file has an unsupported schema.")
     return value
+
+
+def _wait_for_guard_ready(
+    process: subprocess.Popen,
+    runtime_dir: Path,
+    timeout: float = 3.0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    deadline = time.monotonic() + timeout
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=1)
+        if probe.returncode == 0:
+            try:
+                status = _read_guard_status(runtime_dir)
+            except SanitizerCollectionError as exc:
+                last_error = str(exc)
+                status = None
+            if status is not None:
+                state = status.get("guard_state")
+                if state == "awaiting_manager_authorization":
+                    return status, None
+                if state in ("preflight_blocked", "manager_authorization_refused", "launch_failed", "finished"):
+                    return status, str(status.get("detail") or f"Guard stopped in state {state}.")
+        elif probe.returncode not in (1,):
+            last_error = "Could not inspect the transient service RuntimeDirectory."
+        time.sleep(0.1)
+    return None, last_error or "Guard did not reach the manager-authorization barrier before the deadline."
 
 
 def _copy_service_stream(
