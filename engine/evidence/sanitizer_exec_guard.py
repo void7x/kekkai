@@ -145,6 +145,41 @@ def read_cgroup_counters(path: Path) -> dict[str, int] | dict[str, Any]:
         return {"available": False, "detail": f"{type(exc).__name__}: {exc}"[:256]}
 
 
+def _unescape_mount_field(value: str) -> str:
+    return (
+        value.replace("\\\\040", " ")
+        .replace("\\\\011", "\\t")
+        .replace("\\\\012", "\\n")
+        .replace("\\\\134", "\\\\")
+    )
+
+
+def verify_readonly_bind(path: Path, mountinfo: str | None = None) -> dict[str, str]:
+    resolved = path.resolve(strict=True)
+    if mountinfo is None:
+        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    matches = []
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        mount_point = _unescape_mount_field(fields[4])
+        if mount_point == str(resolved):
+            matches.append(fields)
+    if not matches:
+        raise ValueError(f"Required read-only bind mount is not present: {resolved}")
+    fields = matches[-1]
+    options = set(fields[5].split(","))
+    if "ro" not in options:
+        raise ValueError(f"Required bind mount is not read-only: {resolved}")
+    return {
+        "path": str(resolved),
+        "mount_id": fields[0],
+        "mount_options": fields[5],
+        "read_only": "true",
+    }
+
+
 def verify_limits() -> dict[str, Any]:
     if os.getuid() == 0 or os.geteuid() == 0:
         raise ValueError("The guard must never run as root")
@@ -357,6 +392,13 @@ def main() -> int:
         input_hash, input_size = hash_regular_file(str(input_path), MAX_INPUT_BYTES)
         if input_hash != args.expected_input_sha256 or input_size != args.expected_input_size:
             raise ValueError("The bound testcase does not match the immutable artifact")
+
+        readonly_binds = {
+            "guard": verify_readonly_bind(Path(__file__)),
+            "harness": verify_readonly_bind(harness_path),
+            "input": verify_readonly_bind(input_path),
+        }
+        status["readonly_bind_mounts"] = readonly_binds
 
         status["guard_state"] = "awaiting_manager_authorization"
         status["execution_status"] = "blocked_preflight"
