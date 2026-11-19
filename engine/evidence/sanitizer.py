@@ -1372,7 +1372,7 @@ def collect_sanitizer_evidence(
                     try:
                         if systemd_process.stdin is None:
                             raise BrokenPipeError("systemd-run stdin pipe is unavailable")
-                        systemd_process.stdin.write(b"\\x01")
+                        systemd_process.stdin.write(b"\x01")
                         systemd_process.stdin.flush()
                         systemd_process.stdin.close()
                         manager_authorized = True
