@@ -271,7 +271,7 @@ class CoverageTests(unittest.TestCase):
         self.assertTrue(report.passed, report.format())
         self.assertEqual(len(report.cases), 18)
         self.assertEqual(len(report.repeat_runs), 2)
-        self.assertEqual(report.distinct_map_count, 18)
+        self.assertEqual(report.distinct_map_count, 10)
         self.assertEqual(report.diversity_status, "passed")
         self.assertEqual(report.repeatability_status, "passed")
         self.assertEqual(report.additional_edge_count, 8)

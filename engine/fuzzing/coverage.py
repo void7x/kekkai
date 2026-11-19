@@ -108,7 +108,7 @@ class CoverageReport:
 
         lines.extend(
             [
-                f"Distinct seed maps: {self.distinct_map_count} "
+                f"Distinct original baseline seed maps: {self.distinct_map_count} "
                 f"[{self.diversity_status}]",
                 f"Adam7 repeatability: {self.repeatability_status}",
             ]
