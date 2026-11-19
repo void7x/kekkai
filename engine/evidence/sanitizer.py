@@ -1611,6 +1611,7 @@ def collect_sanitizer_evidence(
     service_unit: str | None = None
     service_runtime: Path | None = None
     systemd_process: subprocess.Popen | None = None
+    event_channel: _GuardEventChannel | None = None
     launch_requested = False
     service_finalization_attempted = False
     service_cleanup_confirmed = False
@@ -1826,8 +1827,10 @@ def collect_sanitizer_evidence(
                 close_fds=True,
                 bufsize=0,
             )
+            event_channel = _GuardEventChannel(attempt_dir)
+            event_channel.start(systemd_process)
             ready_status, ready_error = _wait_for_guard_ready(
-                systemd_process, runtime_dir, "awaiting_private_staging", timeout=3.0
+                systemd_process, event_channel, "awaiting_private_staging", timeout=3.0
             )
             if ready_status is None or ready_status.get("guard_state") != "awaiting_private_staging":
                 runner_error = ready_error or "Guard did not reach the private-staging barrier."
@@ -1862,7 +1865,7 @@ def collect_sanitizer_evidence(
 
                     if runner_error is None:
                         ready_status, ready_error = _wait_for_guard_ready(
-                            systemd_process, runtime_dir,
+                            systemd_process, event_channel,
                             "awaiting_manager_authorization", timeout=3.0
                         )
                         if ready_status is None or ready_status.get("guard_state") != "awaiting_manager_authorization":
@@ -1886,14 +1889,17 @@ def collect_sanitizer_evidence(
                                 }
                             if preexec_verification["passed"]:
                                 try:
-                                    if systemd_process.stdin is None:
-                                        raise BrokenPipeError("systemd-run stdin pipe is unavailable")
-                                    written = systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
-                                    if written != len(MANAGER_AUTHORIZATION_TOKEN):
-                                        raise BrokenPipeError("Final authorization token was not fully written")
-                                    manager_authorized = True
-                                    systemd_process.stdin.flush()
-                                    _close_process_stdin(systemd_process)
+                                    def _mark_manager_authorization_may_be_delivered() -> None:
+                                        nonlocal manager_authorized
+                                        manager_authorized = True
+                                        manifest["manager_authorization_state"] = "possibly_delivered"
+                                        manifest["manager_authorization_may_have_been_delivered"] = True
+                                        _write_manifest(attempt_dir, manifest)
+
+                                    _deliver_manager_authorization(
+                                        systemd_process,
+                                        _mark_manager_authorization_may_be_delivered,
+                                    )
                                 except (BrokenPipeError, OSError, ValueError) as exc:
                                     runner_error = (
                                         f"Could not deliver harness authorization: {type(exc).__name__}: {exc}"
@@ -1908,7 +1914,7 @@ def collect_sanitizer_evidence(
                 _close_process_stdin(systemd_process)
             else:
                 _, completion_error = _wait_for_guard_completion(
-                    systemd_process, runtime_dir, timeout=SERVICE_RUNTIME_SECONDS + 1.0
+                    systemd_process, event_channel, timeout=SERVICE_RUNTIME_SECONDS + 1.0
                 )
                 if completion_error:
                     runner_error = runner_error or completion_error
@@ -1968,6 +1974,9 @@ def collect_sanitizer_evidence(
                         [str(SUDO), "-n", *argv], systemd_process.returncode, out, err
                     )
 
+        if event_channel is not None:
+            event_channel.join(timeout=2.0)
+
         initial_properties = preexec_properties or _systemd_show(unit)
         systemd_policy_verification = preexec_verification
         cleanup_ok, cleanup_detail, final_properties = _stop_and_verify_service(unit, initial_properties)
@@ -1978,24 +1987,24 @@ def collect_sanitizer_evidence(
         runtime_probe_failed = runtime_probe.returncode not in (0, 1)
         if runtime_probe_failed:
             runner_error = runner_error or "Could not establish whether the attempt RuntimeDirectory exists."
-        guard_status: dict[str, Any] | None = None
-        if runtime_exists:
-            try:
-                guard_status = _read_guard_status(runtime_dir)
-            except SanitizerCollectionError as exc:
-                runner_error = runner_error or str(exc)
-
+        guard_status: dict[str, Any] | None = (
+            event_channel.snapshot() if event_channel is not None else None
+        )
         stdout_bytes: bytes | None = None
         stderr_bytes: bytes | None = None
         stdout_stage: Path | None = None
         stderr_stage: Path | None = None
         stdout_copy_error: str | None = None
         stderr_copy_error: str | None = None
-        if runtime_exists:
-            (
-                (stdout_bytes, stdout_stage, stdout_copy_error),
-                (stderr_bytes, stderr_stage, stderr_copy_error),
-            ) = _copy_service_streams(runtime_dir, attempt_dir)
+        if event_channel is not None:
+            stdout_bytes, stdout_stage, stdout_copy_error = event_channel.stream_result(b"O")
+            stderr_bytes, stderr_stage, stderr_copy_error = event_channel.stream_result(b"E")
+            if event_channel.error:
+                runner_error = runner_error or "Guard event channel failed: " + event_channel.error
+            if guard_status is not None:
+                for kind, key in ((b"O", "stdout"), (b"E", "stderr")):
+                    if event_channel.stream_truncated[kind]:
+                        guard_status.setdefault(key, {})["truncated"] = True
         guard_exec_succeeded = bool(
             guard_status and guard_status.get("harness_exec_succeeded") is True
         )
@@ -2062,6 +2071,11 @@ def collect_sanitizer_evidence(
                 result_status = "interrupted"
             if runner_error and exec_succeeded and not exec_finished:
                 result_status = "timed_out" if "bounded service wait" in runner_error else "interrupted"
+            if event_channel is not None and event_channel.error and exec_succeeded:
+                stdout_capture = "read_failed"
+                stderr_capture = "read_failed"
+                stdout_detail = stdout_detail or event_channel.error
+                stderr_detail = stderr_detail or event_channel.error
             if exec_succeeded and result_status in ("exited", "signaled", "timed_out", "interrupted"):
                 exec_started = exec_started or attempt_started
                 exec_finished = exec_finished or _now()
