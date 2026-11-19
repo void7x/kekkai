@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
@@ -36,6 +37,7 @@ from engine.evidence.sanitizer import (
     _systemd_run_argv,
     _verify_systemd_properties,
 )
+from engine.evidence import sanitizer_exec_guard
 from engine.evidence.sanitizer_exec_guard import (
     STAGING_AUTHORIZATION_TOKEN as GUARD_STAGING_AUTHORIZATION_TOKEN,
     MANAGER_AUTHORIZATION_TOKEN as GUARD_MANAGER_AUTHORIZATION_TOKEN,
@@ -273,6 +275,42 @@ class SanitizerClassificationTests(unittest.TestCase):
             self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, bytes([2]))
             self.assertEqual(GUARD_STAGING_AUTHORIZATION_TOKEN, bytes([1]))
             self.assertEqual(GUARD_MANAGER_AUTHORIZATION_TOKEN, bytes([2]))
+
+
+class SanitizerGuardHandshakeTests(unittest.TestCase):
+    def test_harness_is_not_executed_without_second_authorization_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            runtime.mkdir(mode=0o700)
+            input_path = runtime / "input.bin"
+            input_path.write_bytes(b"testcase")
+            harness_path = runtime / "kekkai_png_harness"
+            harness_path.write_bytes(b"registered harness image")
+            harness_path.chmod(0o500)
+            input_digest = __import__("hashlib").sha256(b"testcase").hexdigest()
+            harness_digest = __import__("hashlib").sha256(b"registered harness image").hexdigest()
+            argv = [
+                "sanitizer_exec_guard.py",
+                "--expected-input-sha256", input_digest,
+                "--expected-input-size", str(len(b"testcase")),
+                "--expected-harness-sha256", harness_digest,
+                "--harness-path", str(harness_path),
+                "--input-path", str(input_path),
+            ]
+            fake_stdin = SimpleNamespace(buffer=io.BytesIO(bytes([1])))
+            with patch.object(sanitizer_exec_guard.sys, "argv", argv), patch.object(
+                sanitizer_exec_guard.sys, "stdin", fake_stdin
+            ), patch.dict(os.environ, {"RUNTIME_DIRECTORY": str(runtime)}, clear=False), patch.object(
+                sanitizer_exec_guard, "verify_limits", return_value={"cpu_quota": 60000}
+            ), patch.object(sanitizer_exec_guard.subprocess, "Popen") as popen:
+                self.assertEqual(sanitizer_exec_guard.main(), 0)
+            popen.assert_not_called()
+            status = json.loads((runtime / "status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["guard_state"], "manager_authorization_refused")
+            self.assertFalse(status["harness_exec_succeeded"])
+            self.assertFalse(status["manager_authorization_received"])
+            self.assertFalse((runtime / "stdout.bin").exists())
+            self.assertFalse((runtime / "stderr.bin").exists())
 
 
 class SanitizerMigrationTests(unittest.TestCase):
