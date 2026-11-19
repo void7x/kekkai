@@ -392,7 +392,10 @@ def _write_new_file(directory: Path, name: str, content: bytes) -> None:
         view = memoryview(content)
         offset = 0
         while offset < len(view):
-            offset += os.write(descriptor, view[offset:])
+            written = os.write(descriptor, view[offset:])
+            if written <= 0:
+                raise OSError("Seed file write made no progress.")
+            offset += written
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -434,10 +437,17 @@ def prepare_libpng_seed_corpus(
 
     source_names = {name for name, _, _ in source_manifest.entries}
     missing = sorted(LIBPNG_BASE_SEED_FILES - source_names)
-    if missing:
+    unexpected = sorted(source_names - LIBPNG_BASE_SEED_FILES)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected: " + ", ".join(unexpected))
         raise SeedCorpusError(
-            "Original seed corpus is missing required pilot seeds: "
-            + ", ".join(missing)
+            "Original seed corpus must contain exactly the ten approved pilot seeds ("
+            + "; ".join(details)
+            + ")."
         )
 
     parent_input = destination_input.parent
@@ -539,6 +549,24 @@ def prepare_libpng_seed_corpus(
 
         if copied_source_manifest.sha256 != source_manifest.sha256:
             raise SeedCorpusError("Original seed corpus changed during preparation.")
+
+        expected_entries = {
+            name: (size, digest)
+            for name, size, digest in source_manifest.entries
+        }
+        expected_entries.update({
+            filename: (len(content), hashlib.sha256(content).hexdigest())
+            for filename, content in candidate_bytes.items()
+        })
+        observed_entries = {
+            name: (size, digest)
+            for name, size, digest in final_manifest.entries
+        }
+        if observed_entries != expected_entries:
+            raise SeedCorpusError(
+                "Prepared corpus does not exactly match the verified original "
+                "seeds and generated candidates."
+            )
         if final_manifest.seed_count != source_manifest.seed_count + len(candidate_bytes):
             raise SeedCorpusError("Prepared corpus has an unexpected seed count.")
 
