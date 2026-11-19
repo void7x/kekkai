@@ -238,6 +238,7 @@ class SanitizerClassificationTests(unittest.TestCase):
             b"ERROR: AddressSanitizer: heap-use-after-free",
             {
                 "harness_exec_succeeded": True,
+                "execution_identity_verified": True,
                 "execution_status": "timed_out",
                 "stdout_capture_state": "read_failed",
                 "stderr_capture_state": "complete",
@@ -253,6 +254,7 @@ class SanitizerClassificationTests(unittest.TestCase):
     def test_no_signature_requires_successful_complete_published_capture(self):
         good = {
             "harness_exec_succeeded": True,
+            "execution_identity_verified": True,
             "execution_status": "exited",
             "exit_code": 0,
             "stdout_capture_state": "complete",
