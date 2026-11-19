@@ -127,22 +127,22 @@ def hash_stable_file(
         os.close(parent_fd)
 
 
-def build_seed_manifest(
-    seed_dir: str | Path,
+def _build_seed_manifest_from_open_directory(
+    root_fd: int,
     *,
     max_file_bytes: int | None = None,
     max_entries: int = MAX_SEED_ENTRIES,
     max_total_bytes: int = MAX_SEED_TOTAL_BYTES,
 ) -> SeedManifest:
-    """Build a deterministic manifest of direct regular seed files.
-
-    Only direct regular files are accepted. Subdirectories, symlinks and
-    special files fail closed so every accepted seed is included in the identity.
-    """
-    if max_entries < 1 or max_total_bytes < 0:
-        raise ValueError("Seed manifest limits are invalid.")
-    root_fd = _open_directory(seed_dir)
+    """Build a deterministic manifest from an already-open directory."""
     try:
+        if max_entries < 1 or max_total_bytes < 0:
+            raise ValueError("Seed manifest limits are invalid.")
+        directory_info = os.fstat(root_fd)
+        if not stat.S_ISDIR(directory_info.st_mode):
+            raise SeedManifestError("Seed manifest descriptor is not a directory.")
+        if directory_info.st_uid != os.getuid():
+            raise SeedManifestError("Directory must be owned by the current user.")
         names = sorted(os.listdir(root_fd))
         if len(names) > max_entries:
             raise SeedManifestError(f"Seed directory exceeds the {max_entries}-entry limit.")
@@ -233,3 +233,50 @@ def build_seed_manifest(
         raise SeedManifestError(f"Cannot safely inspect seed directory: {exc}") from exc
     finally:
         os.close(root_fd)
+
+
+
+def open_seed_directory(path: str | Path) -> int:
+    """Open and validate a seed directory, returning its owned descriptor."""
+    return _open_directory(path)
+
+
+def build_seed_manifest_from_fd(
+    directory_fd: int,
+    *,
+    max_file_bytes: int | None = None,
+    max_entries: int = MAX_SEED_ENTRIES,
+    max_total_bytes: int = MAX_SEED_TOTAL_BYTES,
+) -> SeedManifest:
+    """Build a manifest using a duplicate of an already-open directory descriptor."""
+    if max_entries < 1 or max_total_bytes < 0:
+        raise ValueError("Seed manifest limits are invalid.")
+    try:
+        root_fd = os.dup(directory_fd)
+    except OSError as exc:
+        raise SeedManifestError(f"Cannot duplicate seed directory descriptor: {exc}") from exc
+    return _build_seed_manifest_from_open_directory(
+        root_fd,
+        max_file_bytes=max_file_bytes,
+        max_entries=max_entries,
+        max_total_bytes=max_total_bytes,
+    )
+
+
+def build_seed_manifest(
+    seed_dir: str | Path,
+    *,
+    max_file_bytes: int | None = None,
+    max_entries: int = MAX_SEED_ENTRIES,
+    max_total_bytes: int = MAX_SEED_TOTAL_BYTES,
+) -> SeedManifest:
+    """Build a deterministic manifest of direct regular seed files."""
+    if max_entries < 1 or max_total_bytes < 0:
+        raise ValueError("Seed manifest limits are invalid.")
+    root_fd = _open_directory(seed_dir)
+    return _build_seed_manifest_from_open_directory(
+        root_fd,
+        max_file_bytes=max_file_bytes,
+        max_entries=max_entries,
+        max_total_bytes=max_total_bytes,
+    )

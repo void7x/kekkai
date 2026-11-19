@@ -13,11 +13,15 @@ import subprocess
 from engine.processes import ProcessInterruptedError, run_process_group
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
-from engine.fuzzing.smoke import LIBPNG_SEED_CASES
+from engine.fuzzing.smoke import (
+    LIBPNG_ADDITIONAL_SEED_CASES,
+    LIBPNG_BASE_SEED_CASES,
+    LIBPNG_SEED_CASES,
+)
 
 _MAX_PROCESS_OUTPUT_BYTES = 8 * 1024 * 1024
 _MAX_CAPTURED_PROCESS_OUTPUT_BYTES = 4096
@@ -37,6 +41,7 @@ class CoverageCaseResult:
     elapsed_seconds: float
     message: str
     stderr: str
+    new_edges_vs_baseline: int | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class CoverageReport:
     diversity_status: str
     repeat_runs: tuple[CoverageCaseResult, ...]
     repeatability_status: str
+    additional_edge_count: int | None = None
 
     @property
     def passed(self) -> bool:
@@ -62,6 +68,8 @@ class CoverageReport:
             and len(self.repeat_runs) == 2
             and all(run.status == "passed" for run in self.repeat_runs)
             and self.repeatability_status == "passed"
+            and self.additional_edge_count is not None
+            and self.additional_edge_count > 0
         )
 
     @property
@@ -84,22 +92,34 @@ class CoverageReport:
         ]
 
         for case in self.cases:
+            additional_edges = (
+                ""
+                if case.new_edges_vs_baseline is None
+                else f"; {case.new_edges_vs_baseline} edge locations beyond baseline"
+            )
             lines.append(
                 f"[{case.status.upper()}] {case.name}: "
                 f"{case.tuple_count} tuples; "
                 f"SHA-256={case.sha256 or 'unavailable'}; "
-                f"{case.elapsed_seconds:.3f}s; {case.message}"
+                f"{case.elapsed_seconds:.3f}s; {case.message}{additional_edges}"
             )
             if case.stderr:
                 lines.append(f"  stderr: {case.stderr}")
 
         lines.extend(
             [
-                f"Distinct seed maps: {self.distinct_map_count} "
+                f"Distinct original baseline seed maps: {self.distinct_map_count} "
                 f"[{self.diversity_status}]",
                 f"Adam7 repeatability: {self.repeatability_status}",
             ]
         )
+        if self.additional_edge_count is None:
+            lines.append("Additional seed coverage beyond baseline: not established")
+        else:
+            lines.append(
+                "Additional seed edge locations beyond baseline: "
+                f"{self.additional_edge_count}"
+            )
 
         for run in self.repeat_runs:
             lines.append(
@@ -261,6 +281,15 @@ def _read_coverage_map(path: Path) -> bytes:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _parse_map_locations(map_bytes: bytes) -> frozenset[str]:
+    """Return validated edge-location identifiers from an afl-showmap map."""
+    _parse_map(map_bytes)
+    return frozenset(
+        line.split(":", 1)[0].upper()
+        for line in map_bytes.decode("ascii").splitlines()
+    )
 
 
 def _parse_map(map_bytes: bytes) -> int:
@@ -490,7 +519,10 @@ def validate_coverage(
 
     cases: list[CoverageCaseResult] = []
     repeat_runs: list[CoverageCaseResult] = []
-    seen_hashes: set[str] = set()
+    baseline_case_names = {
+        case_name for case_name, _filename in LIBPNG_BASE_SEED_CASES
+    }
+    baseline_map_hashes: set[str] = set()
 
     external_timeout = max(
         5.0,
@@ -640,15 +672,50 @@ def validate_coverage(
                         )
 
             cases.append(result)
-            if result.status == "passed" and result.sha256 is not None:
-                seen_hashes.add(result.sha256)
+            if (
+                case_name in baseline_case_names
+                and result.status == "passed"
+                and result.sha256 is not None
+            ):
+                baseline_map_hashes.add(result.sha256)
 
         all_seed_cases_passed = (
             len(cases) == len(LIBPNG_SEED_CASES)
             and all(case.status == "passed" for case in cases)
         )
 
-        distinct_map_count = len(seen_hashes)
+        distinct_map_count = len(baseline_map_hashes)
+        additional_edge_count: int | None = None
+
+        if all_seed_cases_passed:
+            baseline_edge_locations: set[str] = set()
+            for case_name, _filename in LIBPNG_BASE_SEED_CASES:
+                map_path = temporary / f"{case_name}.map"
+                baseline_edge_locations.update(
+                    _parse_map_locations(_read_coverage_map(map_path))
+                )
+
+            additional_edge_union: set[str] = set()
+            for case_name, _filename in LIBPNG_ADDITIONAL_SEED_CASES:
+                map_path = temporary / f"{case_name}.map"
+                candidate_edges = _parse_map_locations(
+                    _read_coverage_map(map_path)
+                )
+                index = next(
+                    i for i, result in enumerate(cases)
+                    if result.name == case_name
+                )
+                cases[index] = replace(
+                    cases[index],
+                    new_edges_vs_baseline=len(
+                        candidate_edges - baseline_edge_locations
+                    ),
+                )
+                additional_edge_union.update(candidate_edges)
+
+            additional_edge_count = len(
+                additional_edge_union - baseline_edge_locations
+            )
 
         if all_seed_cases_passed:
             diversity_status = (
@@ -712,4 +779,5 @@ def validate_coverage(
         diversity_status=diversity_status,
         repeat_runs=tuple(repeat_runs),
         repeatability_status=repeatability_status,
+        additional_edge_count=additional_edge_count,
     )

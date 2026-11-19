@@ -17,6 +17,7 @@ from engine.adapters.config import (
     ResourceLimits,
     TargetConfig,
 )
+from engine.fuzzing.libpng_seed_corpus import generate_additional_seed_bytes
 from engine.fuzzing.smoke import (
     HarnessSmokeError,
     LIBPNG_SEED_CASES,
@@ -170,6 +171,7 @@ class HarnessSmokeTests(unittest.TestCase):
                 )
             ),
         }
+        fixtures.update(generate_additional_seed_bytes())
 
         for _, filename in LIBPNG_SEED_CASES:
             (self.seed_dir / filename).write_bytes(fixtures[filename])
@@ -253,7 +255,7 @@ class HarnessSmokeTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(adam7.status, "failed")
         self.assertIn("semantic validation failed", adam7.message)
-        self.assertEqual(mocked_run.call_count, 12)
+        self.assertEqual(mocked_run.call_count, 20)
 
     def test_rejects_fixture_with_invalid_chunk_crc(self) -> None:
         path = self.seed_dir / "valid.png"
@@ -270,7 +272,7 @@ class HarnessSmokeTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(valid.status, "failed")
         self.assertIn("CRC mismatch", valid.message)
-        self.assertEqual(mocked_run.call_count, 12)
+        self.assertEqual(mocked_run.call_count, 20)
 
     def test_rejects_tEXt_chunk_without_keyword_separator(self) -> None:
         from engine.fuzzing.smoke import _validate_seed_fixture
@@ -305,8 +307,8 @@ class HarnessSmokeTests(unittest.TestCase):
         report, mocked_run = self.run_smoke_with_fake_process()
 
         self.assertTrue(report.passed, report.format())
-        self.assertEqual(len(report.results), 13)
-        self.assertEqual(mocked_run.call_count, 13)
+        self.assertEqual(len(report.results), 21)
+        self.assertEqual(mocked_run.call_count, 21)
 
         self.assertIn(
             "missing_input_file",
@@ -464,7 +466,7 @@ class HarnessSmokeTests(unittest.TestCase):
             result for result in report.results if result.name == "adam7_png"
         )
         self.assertEqual(adam7_result.status, "failed")
-        self.assertEqual(mocked_run.call_count, 12)
+        self.assertEqual(mocked_run.call_count, 20)
 
     def test_timeout_fails_smoke_case(self) -> None:
         calls = 0

@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.adapters.config import AdapterConfig
+from engine.fuzzing.libpng_seed_corpus import (
+    ADDITIONAL_SEED_IHDR,
+    LIBPNG_ADDITIONAL_SEED_CASES,
+)
 from engine.processes import ProcessInterruptedError, run_process_group
 
 
@@ -86,7 +90,7 @@ class HarnessSmokeReport:
 # These are the known, reviewed fixtures in the libpng pilot corpus.
 # Ordinary valid and invalid PNG data should be handled without a harness
 # failure. A missing input file is tested separately as an I/O failure.
-LIBPNG_SEED_CASES = (
+LIBPNG_BASE_SEED_CASES = (
     ("valid_png", "valid.png"),
     ("adam7_png", "adam7.png"),
     ("malformed_png", "malformed.png"),
@@ -98,6 +102,7 @@ LIBPNG_SEED_CASES = (
     ("chunk_allocation_limit", "chunk_over_limit.png"),
     ("chunk_cache_limit", "chunk_cache_over_limit.png"),
 )
+LIBPNG_SEED_CASES = LIBPNG_BASE_SEED_CASES + LIBPNG_ADDITIONAL_SEED_CASES
 
 _MAX_CAPTURE_BYTES = 16 * 1024
 _MAX_OUTPUT_FILE_BYTES = 64 * 1024
@@ -107,6 +112,7 @@ _MAX_IMAGE_WIDTH = 8192
 _MAX_IMAGE_HEIGHT = 8192
 _MAX_TOTAL_PIXELS = 16_000_000
 _MAX_ROW_BYTES = 64 * 1024
+_CHANNELS_FOR_PNG = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 _MAX_CHUNK_BYTES = 256 * 1024
 _MAX_CACHED_CHUNKS = 128
 _MAX_PNG_DECOMPRESSED_BYTES = 128 * 1024 * 1024
@@ -316,8 +322,11 @@ def _validate_png_image_data(
 
 def _validate_seed_fixture(case_name: str, path: Path) -> None:
     """Verify that a named smoke fixture really represents its intended case."""
-    data = path.read_bytes()
+    _validate_seed_fixture_data(case_name, path.read_bytes())
 
+
+def _validate_seed_fixture_data(case_name: str, data: bytes) -> None:
+    """Validate fixture semantics from bytes without resolving a filesystem path."""
     if case_name == "malformed_png":
         if not data or data.startswith(_PNG_SIGNATURE):
             raise ValueError("Malformed fixture must have a non-PNG signature.")
@@ -414,6 +423,55 @@ def _validate_seed_fixture(case_name: str, path: Path) -> None:
                 "within either info structure."
             )
         _validate_png_image_data(ihdr, chunks)
+
+    elif case_name in ADDITIONAL_SEED_IHDR:
+        if ihdr != ADDITIONAL_SEED_IHDR[case_name]:
+            raise ValueError(
+                f"{case_name} fixture has unexpected IHDR metadata."
+            )
+        _validate_png_image_data(ihdr, chunks)
+
+        if case_name == "grayscale_16bit":
+            transparency = [
+                payload for kind, payload in chunks if kind == b"tRNS"
+            ]
+            if len(transparency) != 1 or len(transparency[0]) != 2:
+                raise ValueError("16-bit grayscale fixture requires a two-byte tRNS chunk.")
+
+        elif case_name == "rgb_16bit":
+            if sum(kind == b"IDAT" for kind, _ in chunks) < 2:
+                raise ValueError("RGB16 fixture must split image data across IDAT chunks.")
+
+        elif case_name == "indexed_2bit_trns":
+            palettes = [payload for kind, payload in chunks if kind == b"PLTE"]
+            transparency = [payload for kind, payload in chunks if kind == b"tRNS"]
+            if (
+                len(palettes) != 1
+                or len(palettes[0]) != 12
+                or len(transparency) != 1
+                or len(transparency[0]) != 4
+            ):
+                raise ValueError("Indexed fixture requires a four-entry palette and tRNS table.")
+
+        elif case_name == "rgba8_filters_ancillary":
+            if sum(kind == b"IDAT" for kind, _ in chunks) < 2:
+                raise ValueError("Ancillary fixture must split image data across IDAT chunks.")
+            required_chunks = {b"gAMA", b"sRGB", b"pHYs", b"vpAg"}
+            if not required_chunks.issubset(set(chunk_types)):
+                raise ValueError("Ancillary fixture is missing a required metadata chunk.")
+            compressed = b"".join(
+                payload for kind, payload in chunks if kind == b"IDAT"
+            )
+            decoded = zlib.decompress(compressed)
+            width, height, bit_depth, color_type, *_ = ihdr
+            row_bytes = (width * _CHANNELS_FOR_PNG[color_type] * bit_depth + 7) // 8
+            row_size = row_bytes + 1
+            filters = {
+                decoded[offset * row_size]
+                for offset in range(height)
+            }
+            if filters != {0, 1, 2, 3, 4}:
+                raise ValueError("Ancillary fixture must exercise PNG filters 0 through 4.")
 
     else:
         raise ValueError(f"No semantic expectations exist for {case_name!r}.")
