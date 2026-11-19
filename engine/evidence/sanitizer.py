@@ -393,6 +393,7 @@ source, destination, expected, maximum, owner = sys.argv[1:]
 maximum, owner = int(maximum), int(owner)
 fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
 out = None
+created = False
 try:
     before = os.fstat(fd)
     if not stat.S_ISREG(before.st_mode) or before.st_uid != owner:
@@ -402,6 +403,7 @@ try:
     if before.st_size < 0 or before.st_size > maximum:
         raise RuntimeError("source exceeds the staging size limit")
     out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o444)
+    created = True
     digest, total = hashlib.sha256(), 0
     while True:
         block = os.read(fd, 65536)
@@ -437,10 +439,11 @@ try:
 except BaseException:
     if out is not None:
         os.close(out)
-    try:
-        os.unlink(destination)
-    except FileNotFoundError:
-        pass
+    if created:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
     raise
 finally:
     os.close(fd)
