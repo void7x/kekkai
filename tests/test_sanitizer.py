@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -632,7 +633,7 @@ class SanitizerGuardMountTests(unittest.TestCase):
 
 class SanitizerMigrationTests(unittest.TestCase):
     @staticmethod
-    def _insert_parent_evidence(connection, root: Path) -> tuple[EvidenceRepository, dict[str, int]]:
+    def _insert_parent_evidence(connection, root: Path, original_bytes: bytes = b"x") -> tuple[EvidenceRepository, dict[str, int]]:
         repo = EvidenceRepository(connection)
         timestamp = "2026-11-19T10:00:00.000000Z"
         target_id = repo.insert_target({
@@ -710,11 +711,14 @@ class SanitizerMigrationTests(unittest.TestCase):
             "ended_at": timestamp,
             "recorded_at": timestamp,
         })
-        original_sha = "7" * 64
+        original_sha = hashlib.sha256(original_bytes).hexdigest()
         artifact_id = repo.insert_artifact({
             "sha256": original_sha,
-            "size_bytes": 1,
-            "storage_relpath": "objects/sha256/77/77/" + original_sha + ".bin",
+            "size_bytes": len(original_bytes),
+            "storage_relpath": (
+                "objects/sha256/" + original_sha[:2] + "/" + original_sha[2:4]
+                + "/" + original_sha + ".bin"
+            ),
             "first_ingested_at": timestamp,
             "last_verified_at": timestamp,
         })
@@ -824,16 +828,7 @@ class SanitizerMigrationTests(unittest.TestCase):
             original_sha = hashlib.sha256(original_bytes).hexdigest()
             harness_sha = hashlib.sha256(harness.read_bytes()).hexdigest()
             try:
-                _, ids = self._insert_parent_evidence(connection, root)
-                connection.execute(
-                    "UPDATE artifacts SET sha256=?, size_bytes=?, storage_relpath=? WHERE id=?",
-                    (
-                        original_sha,
-                        len(original_bytes),
-                        f"objects/sha256/{original_sha[:2]}/{original_sha[2:4]}/{original_sha}.bin",
-                        ids["artifact_id"],
-                    ),
-                )
+                _, ids = self._insert_parent_evidence(connection, root, original_bytes)
                 connection.execute(
                     "UPDATE target_versions SET source_dir_recorded=? WHERE id=?",
                     (str(source_dir), ids["target_version_id"]),
