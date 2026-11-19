@@ -478,8 +478,9 @@ for raw in sys.argv[1:]:
     path = pathlib.Path(raw)
     if path.parent != pathlib.Path("/run") or not path.name.startswith("kekkai-p3-03-stage-"):
         raise RuntimeError("refusing to remove a path outside the P3-03 /run staging namespace")
-    if not path.name.endswith(("-input", "-harness", "-guard")):
-        raise RuntimeError("unexpected P3-03 staging suffix")
+    import re
+    if not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", path.name):
+        raise RuntimeError("unexpected P3-03 staging path identity")
     try:
         info = path.lstat()
     except FileNotFoundError:
