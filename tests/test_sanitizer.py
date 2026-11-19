@@ -24,6 +24,7 @@ from engine.evidence import migrations as evidence_migrations
 from engine.evidence.migrations import run_migrations
 from engine.evidence.repository import EvidenceRepository, SANITIZER_RUN_COLUMNS
 from engine.evidence.sanitizer import (
+    STAGING_AUTHORIZATION_TOKEN,
     MANAGER_AUTHORIZATION_TOKEN,
     SanitizerCollectionError,
     _classify_output,
@@ -35,7 +36,10 @@ from engine.evidence.sanitizer import (
     _systemd_run_argv,
     _verify_systemd_properties,
 )
-from engine.evidence.sanitizer_exec_guard import MANAGER_AUTHORIZATION_TOKEN as GUARD_AUTHORIZATION_TOKEN
+from engine.evidence.sanitizer_exec_guard import (
+    STAGING_AUTHORIZATION_TOKEN as GUARD_STAGING_AUTHORIZATION_TOKEN,
+    MANAGER_AUTHORIZATION_TOKEN as GUARD_MANAGER_AUTHORIZATION_TOKEN,
+)
 from engine.evidence.store import EvidenceStore
 
 
@@ -194,6 +198,8 @@ class SanitizerClassificationTests(unittest.TestCase):
             "LoadState": "loaded",
             "ActiveState": "active",
             "SubState": "running",
+            "MainPID": "4321",
+            "ControlGroup": "/system.slice/kekkai-p3-03-test.service",
             "Type": "exec",
             "DynamicUser": "yes",
             "NoNewPrivileges": "yes",
@@ -263,8 +269,10 @@ class SanitizerClassificationTests(unittest.TestCase):
             input_arg = argv.index("--input-path")
             self.assertEqual(argv[harness_arg + 1], "/run/kekkai-p3-03-test/kekkai_png_harness")
             self.assertEqual(argv[input_arg + 1], "/run/kekkai-p3-03-test/input.bin")
-            self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, b"\x01")
-            self.assertEqual(GUARD_AUTHORIZATION_TOKEN, b"\x01")
+            self.assertEqual(STAGING_AUTHORIZATION_TOKEN, bytes([1]))
+            self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, bytes([2]))
+            self.assertEqual(GUARD_STAGING_AUTHORIZATION_TOKEN, bytes([1]))
+            self.assertEqual(GUARD_MANAGER_AUTHORIZATION_TOKEN, bytes([2]))
 
 
 class SanitizerMigrationTests(unittest.TestCase):
@@ -490,7 +498,9 @@ class SanitizerMigrationTests(unittest.TestCase):
         with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
             "engine.evidence.sanitizer._read_guard_status", return_value=ready
         ):
-            status, error = _wait_for_guard_ready(process, Path("/run/p3-ready"), timeout=0.1)
+            status, error = _wait_for_guard_ready(
+                process, Path("/run/p3-ready"), "awaiting_manager_authorization", timeout=0.1
+            )
         self.assertEqual(status, ready)
         self.assertIsNone(error)
 
@@ -504,7 +514,9 @@ class SanitizerMigrationTests(unittest.TestCase):
         with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
             "engine.evidence.sanitizer._read_guard_status", return_value=refused
         ):
-            status, error = _wait_for_guard_ready(process, Path("/run/p3-refused"), timeout=0.1)
+            status, error = _wait_for_guard_ready(
+                process, Path("/run/p3-refused"), "awaiting_private_staging", timeout=0.1
+            )
         self.assertEqual(status, refused)
         self.assertIn("effective CPU quota missing", error)
 
