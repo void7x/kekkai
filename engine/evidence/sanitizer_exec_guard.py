@@ -348,7 +348,7 @@ def main() -> int:
         status["manager_authorization_received"] = False
         write_status(runtime, status)
         authorization = sys.stdin.buffer.read(1)
-        if authorization != b"\\x01":
+        if authorization != b"\x01":
             status["detail"] = "System-manager authorization was not received; harness was not executed."
             status["guard_state"] = "manager_authorization_refused"
             write_status(runtime, status)
