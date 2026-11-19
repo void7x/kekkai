@@ -925,6 +925,7 @@ def _systemd_run_argv(
 
 def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tuple[list[str], str]:
     families: set[str] = set()
+    identity_verified = status.get("execution_identity_verified", True) is True
     for stream in (stdout, stderr):
         if b"ERROR: AddressSanitizer:" in stream:
             families.add("address")
@@ -933,13 +934,14 @@ def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tu
         if b"runtime error:" in stream:
             families.add("undefined_behavior")
     ordered = sorted(families)
-    if status.get("harness_exec_succeeded") is True and ordered:
+    if status.get("harness_exec_succeeded") is True and identity_verified and ordered:
         return ordered, "report_signature_observed"
     complete = (
         status.get("systemd_policy_verified") is True
         and status.get("execution_status") == "exited"
         and status.get("exit_code") == 0
         and status.get("harness_exec_succeeded") is True
+        and identity_verified
         and status.get("stdout_capture_state") == "complete"
         and status.get("stderr_capture_state") == "complete"
         and status.get("stdout_truncated") is False
@@ -1503,13 +1505,9 @@ def collect_sanitizer_evidence(
                 "could not be verified."
             )
         root_stage_cleanup_ok = False
-        root_stage_cleanup_detail: str | None = None
-        if cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed:
-            root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(root_staged_files)
-        else:
-            root_stage_cleanup_detail = "Root-owned staged files retained until service cleanup is verified."
-        cleanup_ok = cleanup_ok and runtime_cleanup_ok and root_stage_cleanup_ok
-        cleanup_detail = cleanup_detail or runtime_cleanup_detail or root_stage_cleanup_detail
+        root_stage_cleanup_detail: str | None = "Root-owned staged files retained until final identity checks complete."
+        cleanup_ok = cleanup_ok and runtime_cleanup_ok
+        cleanup_detail = cleanup_detail or runtime_cleanup_detail
         if stdout_copy_error:
             runner_error = runner_error or "stdout recovery copy failed: " + stdout_copy_error
         if stderr_copy_error:
@@ -1619,6 +1617,64 @@ def collect_sanitizer_evidence(
             published_stdout = published_stderr = None
             stdout_stage = stderr_stage = None
 
+        identity_verification: dict[str, Any] = {
+            "passed": False,
+            "issues": [],
+        }
+        try:
+            current_harness, _ = _verify_diagnostic_build(context)
+            checks = {
+                "registered_harness_path_unchanged": current_harness == harness,
+                "registered_harness_digest_unchanged": _hash_regular_file(
+                    current_harness, 32 * 1024 * 1024
+                )[0] == registered_harness_sha256,
+                "staged_harness_digest_unchanged": _hash_regular_file(
+                    root_harness, 32 * 1024 * 1024
+                )[0] == registered_harness_sha256,
+                "staged_input_digest_unchanged": _hash_regular_file(
+                    root_input, MAX_INPUT_BYTES
+                ) == (input_digest, input_size),
+                "attempt_input_digest_unchanged": _hash_regular_file(
+                    input_path, MAX_INPUT_BYTES
+                ) == (input_digest, input_size),
+                "stored_original_digest_unchanged": hashlib.sha256(
+                    store.read_verified_artifact(str(context["original_artifact_sha256"]))
+                ).hexdigest() == str(context["original_artifact_sha256"]),
+                "staged_guard_digest_unchanged": _hash_regular_file(
+                    root_guard, 1024 * 1024
+                )[0] == guard_sha256,
+            }
+            for label, staged_path in (
+                ("input", root_input),
+                ("harness", root_harness),
+                ("guard", root_guard),
+            ):
+                info = staged_path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
+                    checks[f"staged_{label}_permissions"] = False
+            identity_verification = {
+                "passed": all(checks.values()),
+                "checks": checks,
+                "issues": [name for name, passed in checks.items() if not passed],
+            }
+        except Exception as exc:
+            identity_verification = {
+                "passed": False,
+                "issues": [f"{type(exc).__name__}: {exc}"[:512]],
+            }
+        if not identity_verification["passed"]:
+            runner_error = runner_error or (
+                "Final execution identity verification failed: "
+                + "; ".join(identity_verification["issues"])
+            )
+        if cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed and identity_verification["passed"]:
+            root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(root_staged_files)
+        else:
+            root_stage_cleanup_ok = False
+            root_stage_cleanup_detail = "Root-owned staged files retained because service or identity verification was incomplete."
+        cleanup_ok = cleanup_ok and root_stage_cleanup_ok
+        cleanup_detail = cleanup_detail or root_stage_cleanup_detail
+
         stdout_raw = stdout_bytes or b""
         stderr_raw = stderr_bytes or b""
         classification_status = {
@@ -1632,8 +1688,12 @@ def collect_sanitizer_evidence(
             "stdout_publication_state": stdout_publication,
             "stderr_publication_state": stderr_publication,
             "systemd_policy_verified": systemd_policy_verification["passed"],
+            "execution_identity_verified": identity_verification["passed"],
         }
         families, assessment = _classify_output(stdout_raw, stderr_raw, classification_status)
+        if not identity_verification["passed"]:
+            families = []
+            assessment = "inconclusive"
         if result_status in ("blocked_preflight", "launch_failed"):
             assessment = "inconclusive"
             families = []
@@ -1664,6 +1724,7 @@ def collect_sanitizer_evidence(
             "systemd_run_stdout": _diagnostic_capture(systemd_result.stdout) if systemd_result else None,
             "systemd_run_stderr": _diagnostic_capture(systemd_result.stderr) if systemd_result else None,
             "guard_status": guard_status,
+            "execution_identity_verification": identity_verification,
             "service_cleanup_verified": cleanup_ok,
             "service_cleanup_detail": cleanup_detail,
             "runtime_directory_removed": runtime_cleanup_ok,
