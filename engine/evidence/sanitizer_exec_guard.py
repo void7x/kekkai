@@ -27,7 +27,10 @@ STAGING_AUTHORIZATION_TOKEN = bytes([1])
 MANAGER_AUTHORIZATION_TOKEN = bytes([2])
 READ_CHUNK = 64 * 1024
 HARNESS_PATH = "/run/kekkai-harness/kekkai_png_harness"
-RUNTIME_FILES = ("status.json", "status.tmp", "stdout.bin", "stderr.bin")
+FRAME_MAGIC = b"K3E1"
+FRAME_MAX_BYTES = 64 * 1024
+FRAME_WRITE_LOCK = threading.Lock()
+
 
 
 def utc_now() -> str:
@@ -71,23 +74,20 @@ def write_all(fd: int, content: bytes) -> None:
         view = view[written:]
 
 
+def emit_frame(kind: bytes, payload: bytes) -> None:
+    if kind not in (b"S", b"O", b"E") or len(payload) > FRAME_MAX_BYTES:
+        raise ValueError("Invalid guard event frame.")
+    header = FRAME_MAGIC + kind + len(payload).to_bytes(4, "big")
+    with FRAME_WRITE_LOCK:
+        output = sys.stdout.buffer
+        if output.write(header) != len(header) or output.write(payload) != len(payload):
+            raise OSError("short guard event-channel write")
+        output.flush()
+
+
 def write_status(runtime: Path, value: dict[str, Any]) -> None:
-    path_tmp = runtime / "status.tmp"
-    path_status = runtime / "status.json"
-    raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path_tmp, flags, 0o600)
-    try:
-        write_all(fd, raw)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(path_tmp, path_status)
-    directory_fd = os.open(runtime, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    emit_frame(b"S", raw)
 
 
 def read_proc_status() -> dict[str, str]:
@@ -250,16 +250,7 @@ def verify_limits() -> dict[str, Any]:
     }
 
 
-def open_output(path: Path) -> int:
-    return os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-
-
-def drain_stream(pipe, output_fd: int, result: dict[str, Any], key: str) -> None:
+def drain_stream(pipe, result: dict[str, Any], key: str, frame_kind: bytes) -> None:
     retained = 0
     truncated = False
     error: str | None = None
@@ -271,11 +262,10 @@ def drain_stream(pipe, output_fd: int, result: dict[str, Any], key: str) -> None
             remaining = max(0, MAX_OUTPUT_BYTES - retained)
             if remaining:
                 piece = block[:remaining]
-                write_all(output_fd, piece)
+                emit_frame(frame_kind, piece)
                 retained += len(piece)
             if len(block) > remaining:
                 truncated = True
-        os.fsync(output_fd)
     except OSError as exc:
         error = f"{type(exc).__name__}: {exc}"[:512]
     finally:
@@ -289,10 +279,6 @@ def drain_stream(pipe, output_fd: int, result: dict[str, Any], key: str) -> None
             "retained_bytes": retained,
             "detail": error,
         }
-        try:
-            os.close(output_fd)
-        except OSError:
-            pass
 
 
 def main() -> int:
@@ -416,13 +402,6 @@ def main() -> int:
         status["execution_status"] = "launch_failed"
         write_status(runtime, status)
 
-        stdout_fd = open_output(runtime / "stdout.bin")
-        try:
-            stderr_fd = open_output(runtime / "stderr.bin")
-        except BaseException:
-            os.close(stdout_fd)
-            raise
-
         child_env = {
             "PATH": "/usr/bin:/bin",
             "LC_ALL": "C",
@@ -447,8 +426,6 @@ def main() -> int:
                 bufsize=0,
             )
         except OSError as exc:
-            os.close(stdout_fd)
-            os.close(stderr_fd)
             status["detail"] = f"Harness exec failed: {type(exc).__name__}: {exc}"[:1024]
             status["execution_status"] = "launch_failed"
             status["guard_state"] = "launch_failed"
@@ -464,8 +441,8 @@ def main() -> int:
 
         streams: dict[str, Any] = {}
         readers = [
-            threading.Thread(target=drain_stream, args=(process.stdout, stdout_fd, streams, "stdout"), daemon=True),
-            threading.Thread(target=drain_stream, args=(process.stderr, stderr_fd, streams, "stderr"), daemon=True),
+            threading.Thread(target=drain_stream, args=(process.stdout, streams, "stdout", b"O"), daemon=True),
+            threading.Thread(target=drain_stream, args=(process.stderr, streams, "stderr", b"E"), daemon=True),
         ]
         for reader in readers:
             reader.start()
