@@ -40,7 +40,8 @@ SYSTEMCTL = Path("/usr/bin/systemctl")
 SUDO = Path("/usr/bin/sudo")
 PYTHON = Path("/usr/bin/python3")
 GUARD_SOURCE = Path(__file__).with_name("sanitizer_exec_guard.py")
-MANAGER_AUTHORIZATION_TOKEN = b"\x01"
+STAGING_AUTHORIZATION_TOKEN = bytes([1])
+MANAGER_AUTHORIZATION_TOKEN = bytes([2])
 
 
 class SanitizerCollectionError(RuntimeError):
@@ -1283,6 +1284,7 @@ def collect_sanitizer_evidence(
     service_finalization_attempted = False
     service_cleanup_confirmed = False
     root_staged_files: list[Path] = []
+    root_staged_uid: int | None = None
     root_stage_cleanup_finalized = False
     previous_sigterm_handler: Any = None
     attempt_manifest: dict[str, Any] | None = None
@@ -1795,11 +1797,11 @@ def collect_sanitizer_evidence(
                 "registered_harness_digest_unchanged": _hash_regular_file(
                     current_harness, 32 * 1024 * 1024
                 )[0] == registered_harness_sha256,
-                "staged_harness_digest_unchanged": _hash_regular_file(
-                    root_harness, 32 * 1024 * 1024
+                "staged_harness_digest_unchanged": _root_hash_regular_file(
+                    root_harness, 32 * 1024 * 1024, root_staged_uid
                 )[0] == registered_harness_sha256,
-                "staged_input_digest_unchanged": _hash_regular_file(
-                    root_input, MAX_INPUT_BYTES
+                "staged_input_digest_unchanged": _root_hash_regular_file(
+                    root_input, MAX_INPUT_BYTES, root_staged_uid
                 ) == (input_digest, input_size),
                 "attempt_input_digest_unchanged": _hash_regular_file(
                     input_path, MAX_INPUT_BYTES
@@ -1807,8 +1809,8 @@ def collect_sanitizer_evidence(
                 "stored_original_digest_unchanged": hashlib.sha256(
                     store.read_verified_artifact(str(context["original_artifact_sha256"]))
                 ).hexdigest() == str(context["original_artifact_sha256"]),
-                "staged_guard_digest_unchanged": _hash_regular_file(
-                    root_guard, 1024 * 1024
+                "staged_guard_digest_unchanged": _root_hash_regular_file(
+                    root_guard, 1024 * 1024, root_staged_uid
                 )[0] == guard_sha256,
             }
             for label, staged_path in (
@@ -1817,7 +1819,12 @@ def collect_sanitizer_evidence(
                 ("guard", root_guard),
             ):
                 info = staged_path.stat(follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != root_staged_uid
+                    or stat.S_IMODE(info.st_mode) != 0o400
+                    or info.st_nlink != 1
+                ):
                     checks[f"staged_{label}_permissions"] = False
             identity_verification = {
                 "passed": all(checks.values()),
@@ -1835,7 +1842,9 @@ def collect_sanitizer_evidence(
                 + "; ".join(identity_verification["issues"])
             )
         if cleanup_ok and runtime_cleanup_ok and not runtime_probe_failed and identity_verification["passed"]:
-            root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(root_staged_files)
+            root_stage_cleanup_ok, root_stage_cleanup_detail = _remove_root_staged_files(
+                root_staged_files, expected_uid=root_staged_uid
+            )
         else:
             root_stage_cleanup_ok = False
             root_stage_cleanup_detail = "Root-owned staged files retained because service or identity verification was incomplete."
@@ -2103,7 +2112,9 @@ def collect_sanitizer_evidence(
         # positively absent or its complete cgroup is known empty.
         if root_staged_files and not root_stage_cleanup_finalized and (not launch_requested or service_cleanup_confirmed):
             try:
-                removed, removal_detail = _remove_root_staged_files(root_staged_files)
+                removed, removal_detail = _remove_root_staged_files(
+                    root_staged_files, expected_uid=root_staged_uid
+                )
                 if not removed and attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
                     attempt_manifest.update({
                         "state": "root_stage_cleanup_unverified",
