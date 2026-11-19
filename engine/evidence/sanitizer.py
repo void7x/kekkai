@@ -1085,7 +1085,9 @@ def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tu
         if b"runtime error:" in stream:
             families.add("undefined_behavior")
     ordered = sorted(families)
-    if status.get("harness_exec_succeeded") is True and identity_verified and ordered:
+    if not identity_verified:
+        return [], "inconclusive"
+    if status.get("harness_exec_succeeded") is True and ordered:
         return ordered, "report_signature_observed"
     complete = (
         status.get("systemd_policy_verified") is True
