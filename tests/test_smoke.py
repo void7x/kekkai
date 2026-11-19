@@ -272,7 +272,7 @@ class HarnessSmokeTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(valid.status, "failed")
         self.assertIn("CRC mismatch", valid.message)
-        self.assertEqual(mocked_run.call_count, 12)
+        self.assertEqual(mocked_run.call_count, 20)
 
     def test_rejects_tEXt_chunk_without_keyword_separator(self) -> None:
         from engine.fuzzing.smoke import _validate_seed_fixture
