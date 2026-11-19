@@ -1212,8 +1212,8 @@ def _copy_service_streams(
         try:
             raw, stage = _copy_service_stream(runtime_dir, name, attempt_dir)
             results.append((raw, stage, None))
-        except SanitizerCollectionError as exc:
-            results.append((None, None, str(exc)))
+        except (SanitizerCollectionError, OSError) as exc:
+            results.append((None, None, f"{type(exc).__name__}: {exc}"))
     return results[0], results[1]
 
 
