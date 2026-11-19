@@ -859,6 +859,14 @@ def _verify_systemd_properties(properties: dict[str, str]) -> dict[str, Any]:
     cpu_period = _parse_systemd_usec(properties.get("CPUQuotaPeriodUSec", ""))
     if cpu_period != 100000:
         issues.append(f"CPUQuotaPeriodUSec: expected 100000 usec, found {properties.get('CPUQuotaPeriodUSec')!r}")
+    try:
+        main_pid = int(properties.get("MainPID", "0"))
+    except ValueError:
+        main_pid = 0
+    if main_pid <= 1:
+        issues.append(f"MainPID: expected an active guard process, found {properties.get('MainPID')!r}")
+    if not properties.get("ControlGroup", "").startswith("/system.slice/"):
+        issues.append(f"ControlGroup: expected an attempt-owned system service cgroup, found {properties.get('ControlGroup')!r}")
     return {"passed": not issues, "issues": issues}
 
 
@@ -1060,6 +1068,7 @@ def _read_guard_status(runtime_dir: Path) -> dict[str, Any] | None:
 def _wait_for_guard_ready(
     process: subprocess.Popen,
     runtime_dir: Path,
+    expected_state: str,
     timeout: float = 3.0,
 ) -> tuple[dict[str, Any] | None, str | None]:
     deadline = time.monotonic() + timeout
@@ -1076,14 +1085,17 @@ def _wait_for_guard_ready(
                 status = None
             if status is not None:
                 state = status.get("guard_state")
-                if state == "awaiting_manager_authorization":
+                if state == expected_state:
                     return status, None
-                if state in ("preflight_blocked", "manager_authorization_refused", "launch_failed", "finished"):
+                if state in (
+                    "preflight_blocked", "staging_authorization_refused",
+                    "manager_authorization_refused", "launch_failed", "finished",
+                ):
                     return status, str(status.get("detail") or f"Guard stopped in state {state}.")
         elif probe.returncode not in (1,):
             last_error = "Could not inspect the transient service RuntimeDirectory."
         time.sleep(0.1)
-    return None, last_error or "Guard did not reach the manager-authorization barrier before the deadline."
+    return None, last_error or f"Guard did not reach {expected_state!r} before the deadline."
 
 
 def _copy_service_stream(
