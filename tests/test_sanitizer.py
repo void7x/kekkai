@@ -862,9 +862,6 @@ class SanitizerMigrationTests(unittest.TestCase):
                 "MainPID": "4242",
                 "ControlGroup": "/system.slice/kekkai-p3-03-test.service",
             }
-            execution_start = "2026-11-19T10:00:01.000000Z"
-            execution_finish = "2026-11-19T10:00:02.000000Z"
-
             class FakeProcess:
                 def __init__(self):
                     self.stdin = io.BytesIO()
@@ -883,6 +880,8 @@ class SanitizerMigrationTests(unittest.TestCase):
 
             class FakeEventChannel:
                 def __init__(self, attempt_dir):
+                    execution_start = sanitizer_module._now()
+                    execution_finish = sanitizer_module._now()
                     self.attempt_dir = attempt_dir
                     self.error = None
                     self.stream_truncated = {b"O": False, b"E": False}
