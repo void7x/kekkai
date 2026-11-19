@@ -23,7 +23,8 @@ from typing import Any
 
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
-MANAGER_AUTHORIZATION_TOKEN = b"\x01"
+STAGING_AUTHORIZATION_TOKEN = b"\x01"
+MANAGER_AUTHORIZATION_TOKEN = b"\x02"
 READ_CHUNK = 64 * 1024
 HARNESS_PATH = "/run/kekkai-harness/kekkai_png_harness"
 RUNTIME_FILES = ("status.json", "status.tmp", "stdout.bin", "stderr.bin")
@@ -326,6 +327,17 @@ def main() -> int:
     try:
         resource_observation = verify_limits()
         status["resource_observation"] = resource_observation
+
+        status["guard_state"] = "awaiting_private_staging"
+        status["execution_status"] = "blocked_preflight"
+        status["manager_authorization_received"] = False
+        write_status(runtime, status)
+        staging_authorization = sys.stdin.buffer.read(1)
+        if staging_authorization != STAGING_AUTHORIZATION_TOKEN:
+            status["detail"] = "Private staging authorization was not received; harness was not executed."
+            status["guard_state"] = "staging_authorization_refused"
+            write_status(runtime, status)
+            return 0
 
         harness_path = Path(args.harness_path)
         if harness_path != runtime / "kekkai_png_harness":
