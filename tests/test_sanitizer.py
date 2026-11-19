@@ -246,6 +246,7 @@ class SanitizerClassificationTests(unittest.TestCase):
                 guard,
                 "a" * 64,
                 5,
+                "b" * 64,
             )
             self.assertIn("--pipe", argv)
             self.assertIn("--remain-after-exit", argv)
