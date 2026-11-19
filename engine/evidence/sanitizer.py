@@ -552,6 +552,57 @@ print(str(uid) + "\\t" + str(gid))
     return uid, gid
 
 
+def _root_hash_regular_file(
+    path: Path,
+    maximum: int,
+    expected_uid: int | None,
+) -> tuple[str, int]:
+    if expected_uid is None or path.parent != Path("/run"):
+        raise SanitizerCollectionError("Root-staged file has no verified DynamicUser owner.")
+    helper = r'''
+import hashlib, os, pathlib, stat, sys
+path = pathlib.Path(sys.argv[1])
+maximum, expected_uid = int(sys.argv[2]), int(sys.argv[3])
+if path.parent != pathlib.Path("/run"):
+    raise RuntimeError("staged path is outside /run")
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+digest, total = hashlib.sha256(), 0
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != expected_uid or stat.S_IMODE(before.st_mode) != 0o400 or before.st_nlink != 1:
+        raise RuntimeError("staged file ownership or mode differs from the verified DynamicUser identity")
+    while True:
+        block = os.read(fd, 65536)
+        if not block:
+            break
+        total += len(block)
+        if total > maximum:
+            raise RuntimeError("staged file exceeds the configured bound")
+        digest.update(block)
+    after = os.fstat(fd)
+    identity = lambda x: (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
+    if identity(before) != identity(after) or total != before.st_size:
+        raise RuntimeError("staged file changed while hashing")
+    print(digest.hexdigest() + chr(9) + str(total))
+finally:
+    os.close(fd)
+'''
+    result = _sudo(
+        [str(PYTHON), "-c", helper, str(path), str(maximum), str(expected_uid)],
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise SanitizerCollectionError(
+            f"Cannot verify private staged file {path.name}: "
+            + result.stderr.decode("utf-8", errors="replace")[:1024]
+        )
+    try:
+        digest, size = result.stdout.decode("ascii").strip().split(chr(9), 1)
+        return digest, int(size)
+    except (UnicodeError, ValueError) as exc:
+        raise SanitizerCollectionError("Root hash helper returned malformed identity data.") from exc
+
+
 def _remove_root_staged_files(
     paths: list[Path],
     expected_uid: int | None = None,
