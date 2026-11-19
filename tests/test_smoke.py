@@ -466,7 +466,7 @@ class HarnessSmokeTests(unittest.TestCase):
             result for result in report.results if result.name == "adam7_png"
         )
         self.assertEqual(adam7_result.status, "failed")
-        self.assertEqual(mocked_run.call_count, 12)
+        self.assertEqual(mocked_run.call_count, 20)
 
     def test_timeout_fails_smoke_case(self) -> None:
         calls = 0
