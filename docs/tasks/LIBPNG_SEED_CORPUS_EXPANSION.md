@@ -1,6 +1,6 @@
 # Libpng seed-corpus expansion
 
-**Status:** Descriptor-anchored preparation fix committed at `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`; owner-side WSL revalidation of that exact commit is pending. Earlier native corpus and coverage results are summarized in [PR #11](https://github.com/void7x/kekkai/pull/11) and are not validation of the latest preparation fix.
+**Status:** Descriptor-anchored preparation fix committed at `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`; owner-side WSL revalidation of that exact code commit passed on 2026-11-19. The verification was run from repository HEAD `d9074f39508d68cc8e7f2a52b1af3a12edd61e40`, with no changes to `engine/`, `tests/`, `scripts/` or `targets/` after the reviewed code commit.
 **Base:** `development` at `64db5c3050fd68ac601dd189b89b1c6e3f574e0e`
 **Branch:** `feature/libpng-seed-corpus`
 
@@ -76,6 +76,28 @@ The earlier owner-reported native run prepared the expanded corpus before the de
 - Supplemental seeds contributed 315 additional AFL map locations beyond the original baseline.
 
 These results describe the corpus and coverage validation performed before the latest descriptor-anchoring fix. They do **not** establish that the preparation and cleanup changes in commit `188c27ed6ca9e36eae427ad50985761bf9ecbbb5` were exercised. Exact-commit owner-side WSL revalidation remains pending.
+
+## 5.2 Descriptor-anchored preparation revalidation
+
+The owner reran preparation and validation in WSL on 2026-11-19 after confirming that the code under `engine/`, `tests/`, `scripts/` and `targets/` was unchanged from reviewed code commit `188c27ed6ca9e36eae427ad50985761bf9ecbbb5`. The repository HEAD also contained the documentation-only follow-up `d9074f39508d68cc8e7f2a52b1af3a12edd61e40`.
+
+A fresh output directory was used:
+
+`/home/sahil/kekkai-work/fuzzing/libpng-1.6.59/seeds-20261119-expanded-recheck-188c27ed`
+
+Owner-reported WSL results:
+
+- Preparation succeeded with 18 seeds and 268,238 total bytes.
+- Manifest SHA-256 matched the prior corpus: `458db92e1fe7d4f86bb016abd9ce0d94faadc69c7a1a754fe86ac55579e8d0c7`.
+- Original source corpus was preserved.
+- Harness smoke: **21/21 passed**, zero failures.
+- AFL-showmap: **18/18 seed maps passed** using version 4.33c.
+- Original baseline diversity: **10 distinct maps**, passed.
+- Adam7 repeatability: passed; both repeated measurements matched the initial map (552 tuples, SHA-256 `e4487f9cda4ff43ac5545a897b1764914c4b8540772802ec8db5e3168104433d`).
+- Supplemental corpus: **315 additional AFL map locations** beyond the baseline.
+- Validation completed without starting `afl-fuzz`.
+
+These results validate the preparation and validation workflow after the descriptor-anchoring code change. They do not represent a new fuzzing campaign or a crash/hang observation.
 
 ## 6. Current gate
 
