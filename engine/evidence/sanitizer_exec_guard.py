@@ -265,12 +265,12 @@ def main() -> int:
     parser.add_argument("--expected-input-size", required=True, type=int)
     parser.add_argument("--expected-harness-sha256", required=True)
     parser.add_argument("--harness-path", required=True)
+    parser.add_argument("--input-path", required=True)
     args = parser.parse_args()
 
     runtime_raw = os.environ.get("RUNTIME_DIRECTORY")
-    credentials_raw = os.environ.get("CREDENTIALS_DIRECTORY")
     runtime = Path(runtime_raw) if runtime_raw else None
-    if runtime is None or credentials_raw is None:
+    if runtime is None:
         return 70
     runtime_link_info = runtime.lstat()
     if stat.S_ISLNK(runtime_link_info.st_mode):
@@ -336,12 +336,26 @@ def main() -> int:
         if not (harness_info.st_mode & stat.S_IXUSR or harness_info.st_mode & stat.S_IXOTH):
             raise ValueError("The harness binary is not executable")
 
-        credential_path = Path(credentials_raw) / "input"
-        input_hash, input_size = hash_regular_file(str(credential_path), MAX_INPUT_BYTES)
+        input_path = Path(args.input_path)
+        if input_path != runtime / "input.bin":
+            raise ValueError("Input path is not the fixed file inside this attempt's RuntimeDirectory")
+        input_hash, input_size = hash_regular_file(str(input_path), MAX_INPUT_BYTES)
         if input_hash != args.expected_input_sha256 or input_size != args.expected_input_size:
-            raise ValueError("The loaded testcase credential does not match the immutable artifact")
+            raise ValueError("The bound testcase does not match the immutable artifact")
 
-        status["guard_state"] = "preflight_passed"
+        status["guard_state"] = "awaiting_manager_authorization"
+        status["execution_status"] = "blocked_preflight"
+        status["manager_authorization_received"] = False
+        write_status(runtime, status)
+        authorization = sys.stdin.buffer.read(1)
+        if authorization != b"\\x01":
+            status["detail"] = "System-manager authorization was not received; harness was not executed."
+            status["guard_state"] = "manager_authorization_refused"
+            write_status(runtime, status)
+            return 0
+
+        status["manager_authorization_received"] = True
+        status["guard_state"] = "manager_authorized"
         status["execution_status"] = "launch_failed"
         write_status(runtime, status)
 
@@ -358,7 +372,7 @@ def main() -> int:
             "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1:abort_on_error=1:symbolize=0",
             "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
         }
-        child_argv = [str(harness_path), str(credential_path)]
+        child_argv = [str(harness_path), str(input_path)]
         status["harness_argv"] = child_argv
         status["harness_environment"] = child_env
         write_status(runtime, status)
