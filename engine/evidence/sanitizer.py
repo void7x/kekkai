@@ -2058,7 +2058,7 @@ def collect_sanitizer_evidence(
             )
 
         stdout_raw = stdout_bytes or b""
-        stderr_raw = stderr_bytes or b"""
+        stderr_raw = stderr_bytes or b""
         classification_status = {
             "harness_exec_succeeded": exec_succeeded,
             "execution_status": result_status,
