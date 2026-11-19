@@ -7,6 +7,7 @@ into the service's private RuntimeDirectory.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -35,6 +36,14 @@ FRAME_WRITE_LOCK = threading.Lock()
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def prevent_ptrace_access() -> None:
+    """Prevent same-UID workload processes from inspecting guard memory or FDs."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE = 4
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), "prctl(PR_SET_DUMPABLE)")
 
 
 def hash_regular_file(path: str, maximum: int) -> tuple[str, int]:
@@ -348,6 +357,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
 
     try:
+        prevent_ptrace_access()
         resource_observation = verify_limits()
         status["resource_observation"] = resource_observation
 
