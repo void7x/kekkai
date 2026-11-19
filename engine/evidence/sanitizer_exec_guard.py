@@ -331,6 +331,7 @@ def main() -> int:
         "schema_version": 1,
         "guard_state": "starting",
         "harness_exec_succeeded": False,
+        "launch_failure_confirmed": False,
         "execution_started_at": None,
         "execution_finished_at": None,
         "execution_status": "blocked_preflight",
@@ -451,6 +452,7 @@ def main() -> int:
             status["detail"] = f"Harness exec failed: {type(exc).__name__}: {exc}"[:1024]
             status["execution_status"] = "launch_failed"
             status["guard_state"] = "launch_failed"
+            status["launch_failure_confirmed"] = True
             write_status(runtime, status)
             return 0
 
