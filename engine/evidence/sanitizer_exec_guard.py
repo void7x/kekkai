@@ -147,12 +147,11 @@ def read_cgroup_counters(path: Path) -> dict[str, int] | dict[str, Any]:
 
 def _unescape_mount_field(value: str) -> str:
     return (
-        value.replace("\\\\040", " ")
-        .replace("\\\\011", "\\t")
-        .replace("\\\\012", "\\n")
-        .replace("\\\\134", "\\\\")
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
     )
-
 
 def verify_readonly_bind(path: Path, mountinfo: str | None = None) -> dict[str, str]:
     resolved = path.resolve(strict=True)
