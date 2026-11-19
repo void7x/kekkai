@@ -12,6 +12,7 @@ CREATE TABLE sanitizer_runs (
         AND substr(run_uid, 15, 1) = '4'
         AND substr(run_uid, 20, 1) IN ('8', '9', 'a', 'b')
         AND run_uid NOT GLOB '*[^0-9a-f-]*'
+        AND length(run_uid) - length(replace(run_uid, '-', '')) = 4
     ),
     target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE RESTRICT,
     target_version_id INTEGER NOT NULL,
@@ -39,33 +40,72 @@ CREATE TABLE sanitizer_runs (
     ),
     attempt_started_at TEXT NOT NULL CHECK (
         length(attempt_started_at) = 27
-        AND substr(attempt_started_at, 20, 1) = '.'
-        AND substr(attempt_started_at, 21, 6) NOT GLOB '*[^0-9]*'
-        AND substr(attempt_started_at, 27, 1) = 'Z'
+        AND attempt_started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        AND CAST(substr(attempt_started_at,6,2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(attempt_started_at,9,2) AS INTEGER) BETWEEN 1 AND CASE
+            WHEN CAST(substr(attempt_started_at,6,2) AS INTEGER) IN (1, 3, 5, 7, 8, 10, 12) THEN 31
+            WHEN CAST(substr(attempt_started_at,6,2) AS INTEGER) IN (4, 6, 9, 11) THEN 30
+            WHEN CAST(substr(attempt_started_at,6,2) AS INTEGER) = 2 AND (CAST(substr(attempt_started_at,1,4) AS INTEGER) % 400 = 0 OR (CAST(substr(attempt_started_at,1,4) AS INTEGER) % 4 = 0 AND CAST(substr(attempt_started_at,1,4) AS INTEGER) % 100 != 0)) THEN 29
+            WHEN CAST(substr(attempt_started_at,6,2) AS INTEGER) = 2 THEN 28
+            ELSE 0
+        END
+        AND CAST(substr(attempt_started_at,12,2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(attempt_started_at,15,2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(attempt_started_at,18,2) AS INTEGER) BETWEEN 0 AND 59
     ),
     attempt_finished_at TEXT NOT NULL CHECK (
         length(attempt_finished_at) = 27
-        AND substr(attempt_finished_at, 20, 1) = '.'
-        AND substr(attempt_finished_at, 21, 6) NOT GLOB '*[^0-9]*'
-        AND substr(attempt_finished_at, 27, 1) = 'Z'
+        AND attempt_finished_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        AND CAST(substr(attempt_finished_at,6,2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(attempt_finished_at,9,2) AS INTEGER) BETWEEN 1 AND CASE
+            WHEN CAST(substr(attempt_finished_at,6,2) AS INTEGER) IN (1, 3, 5, 7, 8, 10, 12) THEN 31
+            WHEN CAST(substr(attempt_finished_at,6,2) AS INTEGER) IN (4, 6, 9, 11) THEN 30
+            WHEN CAST(substr(attempt_finished_at,6,2) AS INTEGER) = 2 AND (CAST(substr(attempt_finished_at,1,4) AS INTEGER) % 400 = 0 OR (CAST(substr(attempt_finished_at,1,4) AS INTEGER) % 4 = 0 AND CAST(substr(attempt_finished_at,1,4) AS INTEGER) % 100 != 0)) THEN 29
+            WHEN CAST(substr(attempt_finished_at,6,2) AS INTEGER) = 2 THEN 28
+            ELSE 0
+        END
+        AND CAST(substr(attempt_finished_at,12,2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(attempt_finished_at,15,2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(attempt_finished_at,18,2) AS INTEGER) BETWEEN 0 AND 59
         AND attempt_finished_at >= attempt_started_at
     ),
     execution_started_at TEXT CHECK (
         execution_started_at IS NULL OR (
             length(execution_started_at) = 27
-            AND substr(execution_started_at, 20, 1) = '.'
-            AND substr(execution_started_at, 21, 6) NOT GLOB '*[^0-9]*'
-            AND substr(execution_started_at, 27, 1) = 'Z'
+        AND execution_started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        AND CAST(substr(execution_started_at,6,2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(execution_started_at,9,2) AS INTEGER) BETWEEN 1 AND CASE
+            WHEN CAST(substr(execution_started_at,6,2) AS INTEGER) IN (1, 3, 5, 7, 8, 10, 12) THEN 31
+            WHEN CAST(substr(execution_started_at,6,2) AS INTEGER) IN (4, 6, 9, 11) THEN 30
+            WHEN CAST(substr(execution_started_at,6,2) AS INTEGER) = 2 AND (CAST(substr(execution_started_at,1,4) AS INTEGER) % 400 = 0 OR (CAST(substr(execution_started_at,1,4) AS INTEGER) % 4 = 0 AND CAST(substr(execution_started_at,1,4) AS INTEGER) % 100 != 0)) THEN 29
+            WHEN CAST(substr(execution_started_at,6,2) AS INTEGER) = 2 THEN 28
+            ELSE 0
+        END
+        AND CAST(substr(execution_started_at,12,2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(execution_started_at,15,2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(execution_started_at,18,2) AS INTEGER) BETWEEN 0 AND 59
+            AND execution_started_at >= attempt_started_at
+            AND execution_started_at <= attempt_finished_at
         )
     ),
     execution_finished_at TEXT CHECK (
         execution_finished_at IS NULL OR (
             length(execution_finished_at) = 27
-            AND substr(execution_finished_at, 20, 1) = '.'
-            AND substr(execution_finished_at, 21, 6) NOT GLOB '*[^0-9]*'
-            AND substr(execution_finished_at, 27, 1) = 'Z'
+        AND execution_finished_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        AND CAST(substr(execution_finished_at,6,2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(execution_finished_at,9,2) AS INTEGER) BETWEEN 1 AND CASE
+            WHEN CAST(substr(execution_finished_at,6,2) AS INTEGER) IN (1, 3, 5, 7, 8, 10, 12) THEN 31
+            WHEN CAST(substr(execution_finished_at,6,2) AS INTEGER) IN (4, 6, 9, 11) THEN 30
+            WHEN CAST(substr(execution_finished_at,6,2) AS INTEGER) = 2 AND (CAST(substr(execution_finished_at,1,4) AS INTEGER) % 400 = 0 OR (CAST(substr(execution_finished_at,1,4) AS INTEGER) % 4 = 0 AND CAST(substr(execution_finished_at,1,4) AS INTEGER) % 100 != 0)) THEN 29
+            WHEN CAST(substr(execution_finished_at,6,2) AS INTEGER) = 2 THEN 28
+            ELSE 0
+        END
+        AND CAST(substr(execution_finished_at,12,2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(execution_finished_at,15,2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(execution_finished_at,18,2) AS INTEGER) BETWEEN 0 AND 59
             AND execution_started_at IS NOT NULL
             AND execution_finished_at >= execution_started_at
+            AND execution_finished_at <= attempt_finished_at
         )
     ),
     execution_status TEXT NOT NULL CHECK (
@@ -124,9 +164,19 @@ CREATE TABLE sanitizer_runs (
     stderr_detail TEXT CHECK (stderr_detail IS NULL OR length(stderr_detail) <= 1024),
     recorded_at TEXT NOT NULL CHECK (
         length(recorded_at) = 27
-        AND substr(recorded_at, 20, 1) = '.'
-        AND substr(recorded_at, 21, 6) NOT GLOB '*[^0-9]*'
-        AND substr(recorded_at, 27, 1) = 'Z'
+        AND recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'
+        AND CAST(substr(recorded_at,6,2) AS INTEGER) BETWEEN 1 AND 12
+        AND CAST(substr(recorded_at,9,2) AS INTEGER) BETWEEN 1 AND CASE
+            WHEN CAST(substr(recorded_at,6,2) AS INTEGER) IN (1, 3, 5, 7, 8, 10, 12) THEN 31
+            WHEN CAST(substr(recorded_at,6,2) AS INTEGER) IN (4, 6, 9, 11) THEN 30
+            WHEN CAST(substr(recorded_at,6,2) AS INTEGER) = 2 AND (CAST(substr(recorded_at,1,4) AS INTEGER) % 400 = 0 OR (CAST(substr(recorded_at,1,4) AS INTEGER) % 4 = 0 AND CAST(substr(recorded_at,1,4) AS INTEGER) % 100 != 0)) THEN 29
+            WHEN CAST(substr(recorded_at,6,2) AS INTEGER) = 2 THEN 28
+            ELSE 0
+        END
+        AND CAST(substr(recorded_at,12,2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(recorded_at,15,2) AS INTEGER) BETWEEN 0 AND 59
+        AND CAST(substr(recorded_at,18,2) AS INTEGER) BETWEEN 0 AND 59
+        AND recorded_at >= attempt_started_at
     ),
     FOREIGN KEY (target_version_id, target_id)
         REFERENCES target_versions(id, target_id) ON DELETE RESTRICT,
@@ -145,7 +195,9 @@ CREATE TABLE sanitizer_runs (
             AND execution_started_at IS NULL
             AND execution_finished_at IS NULL
             AND exit_code IS NULL
-            AND signal_number IS NULL)
+            AND signal_number IS NULL
+            AND stdout_truncated = 0
+            AND stderr_truncated = 0)
         OR
         (execution_status IN ('exited', 'signaled', 'timed_out', 'interrupted')
             AND harness_exec_succeeded = 1
@@ -172,7 +224,8 @@ CREATE TABLE sanitizer_runs (
     ),
     CHECK (
         (stdout_publication_state = 'not_started'
-            AND stdout_capture_state IN ('not_started', 'read_failed') AND stdout_artifact_id IS NULL)
+            AND stdout_capture_state IN ('not_started', 'read_failed')
+            AND stdout_artifact_id IS NULL AND stdout_truncated = 0)
         OR (stdout_publication_state = 'published'
             AND stdout_capture_state IN ('complete', 'read_failed'))
         OR (stdout_publication_state = 'pending_recovery'
@@ -180,7 +233,8 @@ CREATE TABLE sanitizer_runs (
     ),
     CHECK (
         (stderr_publication_state = 'not_started'
-            AND stderr_capture_state IN ('not_started', 'read_failed') AND stderr_artifact_id IS NULL)
+            AND stderr_capture_state IN ('not_started', 'read_failed')
+            AND stderr_artifact_id IS NULL AND stderr_truncated = 0)
         OR (stderr_publication_state = 'published'
             AND stderr_capture_state IN ('complete', 'read_failed'))
         OR (stderr_publication_state = 'pending_recovery'
@@ -212,7 +266,7 @@ CREATE TABLE sanitizer_runs (
             AND stderr_truncated = 0
             AND stdout_publication_state = 'published'
             AND stderr_publication_state = 'published')
-        OR (assessment = 'inconclusive')
+        OR (assessment = 'inconclusive' AND sanitizer_families_json = '[]')
     ),
     CHECK (instr(run_uid, char(0)) = 0),
     CHECK (instr(policy_id, char(0)) = 0),
