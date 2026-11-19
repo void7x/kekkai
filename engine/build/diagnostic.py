@@ -633,7 +633,7 @@ def build_libpng_diagnostic(config: AdapterConfig, project_root: str | Path,
         header_text = generated_header.read_text(encoding="utf-8")
         missing_header_macros = [
             macro for macro in required_header_macros
-            if not re.search(r"^\\s*#\\s*define\\s+" + re.escape(macro) + r"\\b", header_text, re.M)
+            if not re.search(r"^\s*#\s*define\s+" + re.escape(macro) + r"\b", header_text, re.M)
         ]
         if missing_header_macros:
             raise DiagnosticBuildError(
