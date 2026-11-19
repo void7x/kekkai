@@ -1156,6 +1156,13 @@ def collect_sanitizer_evidence(
     store: EvidenceStore | None = None
     service_unit: str | None = None
     service_runtime: Path | None = None
+    systemd_process: subprocess.Popen | None = None
+    launch_requested = False
+    service_finalization_attempted = False
+    service_cleanup_confirmed = False
+    root_staged_files: list[Path] = []
+    previous_sigterm_handler: Any = None
+    attempt_manifest: dict[str, Any] | None = None
     try:
         # Validate stored identities before creating any recovery/staging directories.
         run_migrations(root)
@@ -1228,6 +1235,7 @@ def collect_sanitizer_evidence(
             "expected_stage_files": ["input.bin", "stdout.bin", "stderr.bin"],
         }
         _write_manifest(attempt_dir, manifest)
+        attempt_manifest = manifest
 
         input_path = attempt_dir / "input.bin"
         _write_private_file(input_path, input_bytes)
@@ -1306,7 +1314,6 @@ def collect_sanitizer_evidence(
         root_input = Path("/run") / (stage_prefix + "-input")
         root_harness = Path("/run") / (stage_prefix + "-harness")
         root_guard = Path("/run") / (stage_prefix + "-guard")
-        root_staged_files: list[Path] = []
         registered_harness_sha256 = str(context["diagnostic_harness_binary_sha256"])
         guard_sha256, _ = _hash_regular_file(guard, 1024 * 1024)
         for source_path, staged_path, digest, maximum in (
@@ -1334,17 +1341,20 @@ def collect_sanitizer_evidence(
         })
         _write_manifest(attempt_dir, manifest)
 
-        systemd_process: subprocess.Popen | None = None
         systemd_result: subprocess.CompletedProcess | None = None
         interrupted = False
         runner_error: str | None = None
-        launch_requested = False
         manager_authorized = False
         preexec_properties: dict[str, str] = {}
         preexec_verification: dict[str, Any] = {
             "passed": False,
             "issues": ["Manager properties have not yet been inspected."],
         }
+        def _interrupt_service(signum, frame):
+            raise KeyboardInterrupt(f"collector interrupted by signal {signum}")
+
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _interrupt_service)
         try:
             launch_requested = True
             systemd_process = subprocess.Popen(
@@ -1446,6 +1456,8 @@ def collect_sanitizer_evidence(
         initial_properties = preexec_properties or _systemd_show(unit)
         systemd_policy_verification = preexec_verification
         cleanup_ok, cleanup_detail, final_properties = _stop_and_verify_service(unit, initial_properties)
+        service_finalization_attempted = True
+        service_cleanup_confirmed = cleanup_ok
         runtime_probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=3)
         runtime_exists = runtime_probe.returncode == 0
         runtime_probe_failed = runtime_probe.returncode not in (0, 1)
@@ -1751,6 +1763,22 @@ def collect_sanitizer_evidence(
             _safe_remove_attempt(attempt_dir)
             return SanitizerCollectionResult(run_uid, row_id, result_status, assessment, None)
         return SanitizerCollectionResult(run_uid, row_id, result_status, assessment, attempt_dir)
+    except KeyboardInterrupt as exc:
+        if attempt_dir is not None and attempt_dir.exists() and attempt_manifest is not None:
+            attempt_manifest.update({
+                "state": "collector_interrupted_recovery",
+                "systemd_unit_name": service_unit,
+                "runtime_directory": str(service_runtime) if service_runtime else None,
+                "root_staged_files": [str(item) for item in root_staged_files],
+                "detail": f"Collector interrupted: {type(exc).__name__}: {exc}",
+            })
+            try:
+                _write_manifest(attempt_dir, attempt_manifest)
+            except OSError:
+                pass
+        raise SanitizerCollectionError(
+            "Collector was interrupted. Any attempt manifest and service runtime data were retained for recovery."
+        ) from exc
     except Exception as exc:
         # An incomplete manifest/stage directory is intentionally retained for manual recovery.
         if attempt_dir is not None and attempt_dir.exists():
@@ -1760,6 +1788,65 @@ def collect_sanitizer_evidence(
             ) from exc
         raise
     finally:
+        # A launch request always has a final stop/verification path, including
+        # exceptions raised after systemd-run returns but before evidence commit.
+        if launch_requested and service_unit is not None and not service_finalization_attempted:
+            try:
+                if systemd_process is not None and systemd_process.poll() is None:
+                    if systemd_process.stdin is not None and not systemd_process.stdin.closed:
+                        systemd_process.stdin.close()
+                    _sudo([str(SYSTEMCTL), "stop", service_unit], timeout=7)
+                    try:
+                        systemd_process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        systemd_process.kill()
+                        systemd_process.communicate(timeout=2)
+                current = _systemd_show(service_unit)
+                final_ok, final_detail, _ = _stop_and_verify_service(service_unit, current)
+                service_finalization_attempted = True
+                service_cleanup_confirmed = final_ok
+                if attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
+                    attempt_manifest.update({
+                        "state": "exception_cleanup_verified" if final_ok else "exception_cleanup_unverified",
+                        "exception_cleanup_detail": final_detail,
+                    })
+                    _write_manifest(attempt_dir, attempt_manifest)
+            except Exception as cleanup_exc:
+                if attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
+                    attempt_manifest.update({
+                        "state": "exception_cleanup_unverified",
+                        "exception_cleanup_detail": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:1024],
+                    })
+                    try:
+                        _write_manifest(attempt_dir, attempt_manifest)
+                    except OSError:
+                        pass
+        # Root-owned staged files are removed only after the attempt service is
+        # positively absent or its complete cgroup is known empty.
+        if root_staged_files and (not launch_requested or service_cleanup_confirmed):
+            try:
+                removed, removal_detail = _remove_root_staged_files(root_staged_files)
+                if not removed and attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
+                    attempt_manifest.update({
+                        "state": "root_stage_cleanup_unverified",
+                        "root_stage_cleanup_detail": removal_detail,
+                    })
+                    _write_manifest(attempt_dir, attempt_manifest)
+            except Exception as cleanup_exc:
+                if attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
+                    attempt_manifest.update({
+                        "state": "root_stage_cleanup_unverified",
+                        "root_stage_cleanup_detail": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:1024],
+                    })
+                    try:
+                        _write_manifest(attempt_dir, attempt_manifest)
+                    except OSError:
+                        pass
+        if previous_sigterm_handler is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
+            except ValueError:
+                pass
         if connection is not None:
             connection.close()
         if store is not None:
