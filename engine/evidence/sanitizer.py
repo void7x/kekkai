@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import stat
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -174,6 +175,229 @@ def _write_manifest(attempt_dir: Path, manifest: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
+class _GuardEventChannel:
+    """Receive trusted guard events outside the workload-writable service directory."""
+
+    FRAME_MAGIC = b"K3E1"
+    HEADER_SIZE = 9
+    MAX_FRAME_BYTES = 64 * 1024
+
+    def __init__(self, attempt_dir: Path):
+        self.attempt_dir = attempt_dir
+        self.condition = threading.Condition()
+        self.latest_status: dict[str, Any] | None = None
+        self.error: str | None = None
+        self.eof = False
+        self.reader: threading.Thread | None = None
+        self.stream_paths = {
+            b"O": attempt_dir / "stdout.bin",
+            b"E": attempt_dir / "stderr.bin",
+        }
+        self.stream_fds: dict[bytes, int] = {}
+        self.stream_sizes = {b"O": 0, b"E": 0}
+        self.stream_truncated = {b"O": False, b"E": False}
+
+    def start(self, process: subprocess.Popen) -> None:
+        pipe = process.stdout
+        if pipe is None:
+            raise SanitizerCollectionError("systemd-run stdout control pipe is unavailable.")
+        process.stdout = None
+        self.reader = threading.Thread(target=self._consume, args=(pipe,), daemon=True)
+        self.reader.start()
+
+    @staticmethod
+    def _read_exact(pipe, size: int, *, allow_clean_eof: bool = False) -> bytes | None:
+        chunks = bytearray()
+        while len(chunks) < size:
+            block = pipe.read(size - len(chunks))
+            if not block:
+                if allow_clean_eof and not chunks:
+                    return None
+                raise SanitizerCollectionError("Guard event channel ended inside a frame.")
+            chunks.extend(block)
+        return bytes(chunks)
+
+    def _persist_status(self, status: dict[str, Any]) -> None:
+        raw = (json.dumps(status, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        if len(raw) > self.MAX_FRAME_BYTES:
+            raise SanitizerCollectionError("Guard status frame exceeds its size limit.")
+        temporary = self.attempt_dir / f".guard-status-{uuid.uuid4().hex}.tmp"
+        _write_private_file(temporary, raw)
+        os.replace(temporary, self.attempt_dir / "guard_status.json")
+        directory_fd = os.open(self.attempt_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _open_stream(self, kind: bytes) -> int:
+        descriptor = self.stream_fds.get(kind)
+        if descriptor is not None:
+            return descriptor
+        path = self.stream_paths[kind]
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        self.stream_fds[kind] = descriptor
+        return descriptor
+
+    def _consume(self, pipe) -> None:
+        try:
+            while True:
+                header = self._read_exact(pipe, self.HEADER_SIZE, allow_clean_eof=True)
+                if header is None:
+                    break
+                if header[:4] != self.FRAME_MAGIC or header[4:5] not in (b"S", b"O", b"E"):
+                    raise SanitizerCollectionError("Guard event channel contains an invalid frame header.")
+                kind = header[4:5]
+                size = int.from_bytes(header[5:9], "big")
+                if size > self.MAX_FRAME_BYTES:
+                    raise SanitizerCollectionError("Guard event frame exceeds its size limit.")
+                payload = self._read_exact(pipe, size) if size else b""
+                if payload is None:
+                    raise SanitizerCollectionError("Guard event frame payload is missing.")
+                if kind == b"S":
+                    try:
+                        status = json.loads(payload)
+                    except (UnicodeError, json.JSONDecodeError) as exc:
+                        raise SanitizerCollectionError("Guard status frame is not valid JSON.") from exc
+                    if not isinstance(status, dict) or status.get("schema_version") != 1:
+                        raise SanitizerCollectionError("Guard status frame has an unsupported schema.")
+                    if not isinstance(status.get("guard_state"), str):
+                        raise SanitizerCollectionError("Guard status frame has no valid guard state.")
+                    self._persist_status(status)
+                    with self.condition:
+                        self.latest_status = status
+                        self.condition.notify_all()
+                    continue
+
+                remaining = max(0, MAX_STREAM_BYTES - self.stream_sizes[kind])
+                if remaining:
+                    piece = payload[:remaining]
+                    descriptor = self._open_stream(kind)
+                    _write_all(descriptor, piece)
+                    self.stream_sizes[kind] += len(piece)
+                if len(payload) > remaining:
+                    self.stream_truncated[kind] = True
+        except (OSError, SanitizerCollectionError, ValueError) as exc:
+            with self.condition:
+                self.error = f"{type(exc).__name__}: {exc}"[:1024]
+        finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+            for kind, descriptor in list(self.stream_fds.items()):
+                try:
+                    os.fsync(descriptor)
+                except OSError as exc:
+                    with self.condition:
+                        self.error = self.error or f"stream fsync failed: {exc}"[:1024]
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                self.stream_fds.pop(kind, None)
+            status = self.latest_status
+            if status and status.get("harness_exec_succeeded") is True:
+                for kind, path in self.stream_paths.items():
+                    if not path.exists():
+                        try:
+                            descriptor = self._open_stream(kind)
+                            os.fsync(descriptor)
+                            os.close(descriptor)
+                            self.stream_fds.pop(kind, None)
+                        except OSError as exc:
+                            with self.condition:
+                                self.error = self.error or f"empty stream staging failed: {exc}"[:1024]
+            with self.condition:
+                self.eof = True
+                self.condition.notify_all()
+
+    def wait_for_state(self, expected_state: str, timeout: float) -> tuple[dict[str, Any] | None, str | None]:
+        failures = {
+            "preflight_blocked", "staging_authorization_refused",
+            "manager_authorization_refused", "launch_failed",
+            "finished", "post_exec_failure",
+        }
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                status = self.latest_status
+                state = status.get("guard_state") if status else None
+                if state == expected_state:
+                    return dict(status), None
+                if state in failures:
+                    return dict(status), str(status.get("detail") or f"Guard stopped in state {state}.")
+                if self.eof:
+                    return (dict(status) if status else None), self.error or (
+                        f"Guard event channel ended before reaching {expected_state!r}."
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return (dict(status) if status else None), self.error or (
+                        f"Guard did not reach {expected_state!r} before the deadline."
+                    )
+                self.condition.wait(min(remaining, 0.1))
+
+    def wait_for_terminal(self, timeout: float) -> tuple[dict[str, Any] | None, str | None]:
+        terminal_states = {
+            "preflight_blocked", "staging_authorization_refused",
+            "manager_authorization_refused", "launch_failed",
+            "finished", "post_exec_failure",
+        }
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                status = self.latest_status
+                if status and status.get("guard_state") in terminal_states:
+                    return dict(status), None
+                if self.eof:
+                    return (dict(status) if status else None), self.error or (
+                        "Guard event channel ended before a terminal state was received."
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return (dict(status) if status else None), self.error or (
+                        "Guard did not reach a terminal state before the bounded manager-stop deadline."
+                    )
+                self.condition.wait(min(remaining, 0.1))
+
+    def join(self, timeout: float = 2.0) -> None:
+        if self.reader is not None:
+            self.reader.join(timeout=timeout)
+            if self.reader.is_alive():
+                with self.condition:
+                    self.error = self.error or "Guard event reader did not reach EOF within the bounded wait."
+                    self.condition.notify_all()
+
+    def snapshot(self) -> dict[str, Any] | None:
+        with self.condition:
+            return dict(self.latest_status) if self.latest_status is not None else None
+
+    def stream_result(self, kind: bytes) -> tuple[bytes | None, Path | None, str | None]:
+        path = self.stream_paths[kind]
+        if not path.exists():
+            return None, None, self.error
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return None, None, f"{type(exc).__name__}: {exc}"
+        return raw, path, self.error
+
+
+def _deliver_manager_authorization(process: subprocess.Popen, mark_possible_delivery) -> None:
+    """Persist uncertainty before writing the final byte; never clear it on ambiguity."""
+    if process.stdin is None:
+        raise BrokenPipeError("Final manager authorization pipe is unavailable.")
+    mark_possible_delivery()
+    written = process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
+    if written != len(MANAGER_AUTHORIZATION_TOKEN):
+        raise BrokenPipeError("Final authorization token was not fully written")
+    process.stdin.flush()
+    _close_process_stdin(process)
+
+
 def _open_recovery_lock(recovery_root: Path) -> int:
     path = recovery_root / "recovery.lock"
     descriptor = os.open(
@@ -194,13 +418,16 @@ def _open_recovery_lock(recovery_root: Path) -> int:
 
 
 def _safe_remove_attempt(path: Path) -> None:
-    allowed = {"manifest.json", "input.bin", "stdout.bin", "stderr.bin"}
+    allowed = {"manifest.json", "input.bin", "stdout.bin", "stderr.bin", "guard_status.json"}
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise SanitizerCollectionError(f"Refusing to remove unsafe recovery directory: {path}")
     for entry in path.iterdir():
         entry_info = entry.lstat()
-        if entry.name.startswith(".manifest-") and entry.name.endswith(".tmp"):
+        if (
+            (entry.name.startswith(".manifest-") and entry.name.endswith(".tmp"))
+            or (entry.name.startswith(".guard-status-") and entry.name.endswith(".tmp"))
+        ):
             if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_uid != os.getuid():
                 raise SanitizerCollectionError(f"Unsafe temporary manifest: {entry}")
         elif entry.name not in allowed or not stat.S_ISREG(entry_info.st_mode) or entry_info.st_uid != os.getuid():
@@ -1182,72 +1409,25 @@ def _read_guard_status(runtime_dir: Path) -> dict[str, Any] | None:
 
 def _wait_for_guard_ready(
     process: subprocess.Popen,
-    runtime_dir: Path,
+    channel: _GuardEventChannel,
     expected_state: str,
     timeout: float = 3.0,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    deadline = time.monotonic() + timeout
-    last_error: str | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            break
-        probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=1)
-        if probe.returncode == 0:
-            try:
-                status = _read_guard_status(runtime_dir)
-            except SanitizerCollectionError as exc:
-                last_error = str(exc)
-                status = None
-            if status is not None:
-                state = status.get("guard_state")
-                if state == expected_state:
-                    return status, None
-                if state in (
-                    "preflight_blocked", "staging_authorization_refused",
-                    "manager_authorization_refused", "launch_failed", "finished",
-                ):
-                    return status, str(status.get("detail") or f"Guard stopped in state {state}.")
-        elif probe.returncode not in (1,):
-            last_error = "Could not inspect the transient service RuntimeDirectory."
-        time.sleep(0.1)
-    return None, last_error or f"Guard did not reach {expected_state!r} before the deadline."
+    """Wait for an authenticated status event delivered by the guard process."""
+    del process
+    return channel.wait_for_state(expected_state, timeout)
 
 
 def _wait_for_guard_completion(
     process: subprocess.Popen,
-    runtime_dir: Path,
+    channel: _GuardEventChannel,
     timeout: float = SERVICE_RUNTIME_SECONDS + 1.0,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Wait for the guard's durable terminal status while the manager retains the unit."""
-    terminal_states = {
-        "preflight_blocked",
-        "staging_authorization_refused",
-        "manager_authorization_refused",
-        "launch_failed",
-        "finished",
-        "post_exec_failure",
-    }
-    deadline = time.monotonic() + timeout
-    last_error: str | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            try:
-                return _read_guard_status(runtime_dir), None
-            except SanitizerCollectionError as exc:
-                return None, f"systemd-run exited before a readable terminal guard status: {exc}"
-        probe = _sudo(["/usr/bin/test", "-d", str(runtime_dir)], timeout=1)
-        if probe.returncode == 0:
-            try:
-                status = _read_guard_status(runtime_dir)
-            except SanitizerCollectionError as exc:
-                last_error = str(exc)
-                status = None
-            if status is not None and status.get("guard_state") in terminal_states:
-                return status, None
-        elif probe.returncode not in (1,):
-            last_error = "Could not inspect the attempt RuntimeDirectory while waiting for guard completion."
-        time.sleep(0.05)
-    return None, last_error or "Guard did not reach a terminal state before the bounded manager-stop deadline."
+    """Wait for the trusted guard's terminal status frame."""
+    del process
+    return channel.wait_for_terminal(timeout)
+
+
 
 
 def _copy_service_stream(
