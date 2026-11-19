@@ -402,7 +402,7 @@ try:
         raise RuntimeError("source file is group/world writable")
     if before.st_size < 0 or before.st_size > maximum:
         raise RuntimeError("source exceeds the staging size limit")
-    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o444)
+    out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
     created = True
     digest, total = hashlib.sha256(), 0
     while True:
@@ -426,7 +426,7 @@ try:
         raise RuntimeError("source changed during root staging")
     if actual != expected:
         raise RuntimeError("source digest differs from the registered identity")
-    os.fchmod(out, 0o444)
+    os.fchmod(out, 0o400)
     os.fsync(out)
     os.close(out)
     out = None
@@ -468,24 +468,108 @@ finally:
     return digest, size_value
 
 
-def _remove_root_staged_files(paths: list[Path]) -> tuple[bool, str | None]:
+def _set_root_staged_owner(paths: list[Path], properties: dict[str, str]) -> tuple[int, int]:
+    """Transfer read-only staged files to the exact non-root UID running the guard."""
     if not paths:
-        return True, None
-    names = [str(path) for path in paths]
+        raise SanitizerCollectionError("No private staging files were prepared.")
+    try:
+        main_pid = int(properties.get("MainPID", "0"))
+    except ValueError as exc:
+        raise SanitizerCollectionError("System manager did not expose a valid service MainPID.") from exc
+    control_group = properties.get("ControlGroup", "")
+    if main_pid <= 1 or not control_group.startswith("/system.slice/") or ".." in Path(control_group).parts:
+        raise SanitizerCollectionError("Cannot establish the transient service process identity.")
     helper = r'''
 import os, pathlib, stat, sys
-for raw in sys.argv[1:]:
-    path = pathlib.Path(raw)
+pid, expected_cgroup, *raw_paths = sys.argv[1:]
+proc = pathlib.Path("/proc") / pid
+status = {}
+for line in (proc / "status").read_text(encoding="ascii").splitlines():
+    if ":" in line:
+        key, value = line.split(":", 1)
+        status[key] = value.strip()
+cgroups = (proc / "cgroup").read_text(encoding="ascii").splitlines()
+rows = [line.split("::", 1)[1] for line in cgroups if line.startswith("0::")]
+if rows != [expected_cgroup]:
+    raise RuntimeError("MainPID is not in the expected systemd service cgroup")
+uids = status.get("Uid", "").split()
+gids = status.get("Gid", "").split()
+if len(uids) != 4 or len(gids) != 4:
+    raise RuntimeError("Cannot read effective service UID/GID")
+uid, gid = int(uids[1]), int(gids[1])
+if uid <= 0 or gid <= 0:
+    raise RuntimeError("Dynamic service identity must be non-root")
+paths = [pathlib.Path(raw) for raw in raw_paths]
+for path in paths:
     if path.parent != pathlib.Path("/run") or not path.name.startswith("kekkai-p3-03-stage-"):
-        raise RuntimeError("refusing to remove a path outside the P3-03 /run staging namespace")
-    import re
-    if not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", path.name):
-        raise RuntimeError("unexpected P3-03 staging path identity")
+        raise RuntimeError("staging path is outside the fixed /run namespace")
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o400 or info.st_nlink != 1:
+        raise RuntimeError("staging file identity changed before ownership transfer")
+changed = []
+try:
+    for path in paths:
+        os.chown(path, uid, gid, follow_symlinks=False)
+        os.chmod(path, 0o400, follow_symlinks=False)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        changed.append(path)
+except BaseException:
+    for path in changed:
+        try:
+            os.chown(path, 0, 0, follow_symlinks=False)
+            os.chmod(path, 0o400, follow_symlinks=False)
+        except OSError:
+            pass
+    raise
+directory = os.open("/run", os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+print(str(uid) + "\\t" + str(gid))
+'''
+    result = _sudo(
+        [str(PYTHON), "-c", helper, str(main_pid), control_group, *[str(item) for item in paths]],
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise SanitizerCollectionError(
+            "Cannot assign private staging files to the DynamicUser: "
+            + result.stderr.decode("utf-8", errors="replace")[:1024]
+        )
+    try:
+        uid, gid = (
+            int(item)
+            for item in result.stdout.decode("ascii").strip().split("\\t", 1)
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise SanitizerCollectionError("DynamicUser ownership helper returned malformed identity data.") from exc
+    return uid, gid
+
+
+def _remove_root_staged_files(
+    paths: list[Path],
+    expected_uid: int | None = None,
+) -> tuple[bool, str | None]:
+    if not paths:
+        return True, None
+    owner_ids = "0" if expected_uid is None else f"0,{expected_uid}"
+    helper = r'''
+import os, pathlib, re, stat, sys
+allowed_owners = {int(item) for item in sys.argv[1].split(",")}
+for raw in sys.argv[2:]:
+    path = pathlib.Path(raw)
+    if path.parent != pathlib.Path("/run") or not re.fullmatch(r"kekkai-p3-03-stage-[0-9a-f]{32}-(input|harness|guard)", path.name):
+        raise RuntimeError("refusing to remove a path outside the exact P3-03 staging namespace")
     try:
         info = path.lstat()
     except FileNotFoundError:
         continue
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o444:
+    if not stat.S_ISREG(info.st_mode) or info.st_uid not in allowed_owners or stat.S_IMODE(info.st_mode) != 0o400 or info.st_nlink != 1:
         raise RuntimeError("staging path identity changed; preserving it")
     path.unlink()
 directory = os.open("/run", os.O_RDONLY | os.O_DIRECTORY)
@@ -494,11 +578,13 @@ try:
 finally:
     os.close(directory)
 '''
-    result = _sudo([str(PYTHON), "-c", helper, *names], timeout=5)
+    result = _sudo(
+        [str(PYTHON), "-c", helper, owner_ids, *[str(item) for item in paths]],
+        timeout=5,
+    )
     if result.returncode != 0:
         return False, result.stderr.decode("utf-8", errors="replace")[:1024]
     return True, None
-
 
 def _check_context(
     connection: sqlite3.Connection,
@@ -788,7 +874,7 @@ def _diagnostic_capture(raw: bytes | None) -> dict[str, Any] | None:
 
 def _systemd_show(unit: str) -> dict[str, str]:
     properties = (
-        "LoadState", "ActiveState", "SubState", "Result", "ExecMainCode", "ExecMainStatus",
+        "LoadState", "ActiveState", "SubState", "Result", "MainPID", "ExecMainCode", "ExecMainStatus",
         "ExecMainStartTimestamp", "ExecMainExitTimestamp", "MemoryCurrent",
         "MemoryPeak", "MemorySwapCurrent", "CPUUsageNSec", "TasksCurrent",
         "ControlGroup", "Delegate", "User", "Type", "DynamicUser",
