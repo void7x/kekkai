@@ -40,6 +40,7 @@ SYSTEMCTL = Path("/usr/bin/systemctl")
 SUDO = Path("/usr/bin/sudo")
 PYTHON = Path("/usr/bin/python3")
 GUARD_SOURCE = Path(__file__).with_name("sanitizer_exec_guard.py")
+MANAGER_AUTHORIZATION_TOKEN = b"\\x01"
 
 
 class SanitizerCollectionError(RuntimeError):
@@ -1007,6 +1008,23 @@ def _copy_service_stream(
     _write_private_file(stage, raw)
     return raw, stage
 
+def _copy_service_streams(
+    runtime_dir: Path,
+    attempt_dir: Path,
+) -> tuple[
+    tuple[bytes | None, Path | None, str | None],
+    tuple[bytes | None, Path | None, str | None],
+]:
+    """Attempt both stream copies independently; one failure must not skip the other."""
+    results = []
+    for name in ("stdout.bin", "stderr.bin"):
+        try:
+            raw, stage = _copy_service_stream(runtime_dir, name, attempt_dir)
+            results.append((raw, stage, None))
+        except SanitizerCollectionError as exc:
+            results.append((None, None, str(exc)))
+    return results[0], results[1]
+
 
 def _stream_state(
     guard_status: dict[str, Any] | None,
@@ -1387,7 +1405,7 @@ def collect_sanitizer_evidence(
                     try:
                         if systemd_process.stdin is None:
                             raise BrokenPipeError("systemd-run stdin pipe is unavailable")
-                        systemd_process.stdin.write(b"\x01")
+                        systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
                         systemd_process.stdin.flush()
                         systemd_process.stdin.close()
                         manager_authorized = True
@@ -1479,14 +1497,10 @@ def collect_sanitizer_evidence(
         stdout_copy_error: str | None = None
         stderr_copy_error: str | None = None
         if runtime_exists:
-            try:
-                stdout_bytes, stdout_stage = _copy_service_stream(runtime_dir, "stdout.bin", attempt_dir)
-            except SanitizerCollectionError as exc:
-                stdout_copy_error = str(exc)
-            try:
-                stderr_bytes, stderr_stage = _copy_service_stream(runtime_dir, "stderr.bin", attempt_dir)
-            except SanitizerCollectionError as exc:
-                stderr_copy_error = str(exc)
+            (
+                (stdout_bytes, stdout_stage, stdout_copy_error),
+                (stderr_bytes, stderr_stage, stderr_copy_error),
+            ) = _copy_service_streams(runtime_dir, attempt_dir)
         guard_exec_succeeded = bool(
             guard_status and guard_status.get("harness_exec_succeeded") is True
         )
