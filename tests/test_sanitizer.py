@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from engine.build.diagnostic import (
     DiagnosticBuildError,
@@ -15,14 +20,22 @@ from engine.build.diagnostic import (
     _verify_compile_commands,
 )
 from engine.evidence.database import open_database
+from engine.evidence import migrations as evidence_migrations
 from engine.evidence.migrations import run_migrations
+from engine.evidence.repository import EvidenceRepository, SANITIZER_RUN_COLUMNS
 from engine.evidence.sanitizer import (
+    MANAGER_AUTHORIZATION_TOKEN,
+    SanitizerCollectionError,
     _classify_output,
+    _copy_service_streams,
+    _stop_and_verify_service,
+    _wait_for_guard_ready,
     _parse_properties,
     _resource_policy,
     _systemd_run_argv,
     _verify_systemd_properties,
 )
+from engine.evidence.sanitizer_exec_guard import MANAGER_AUTHORIZATION_TOKEN as GUARD_AUTHORIZATION_TOKEN
 from engine.evidence.store import EvidenceStore
 
 
@@ -245,7 +258,12 @@ class SanitizerClassificationTests(unittest.TestCase):
             self.assertIn("--property=CPUQuota=60%", argv)
             self.assertIn("--property=ProtectControlGroups=strict", argv)
             self.assertIn("--property=KillMode=control-group", argv)
-            self.assertEqual(argv[-2:], ["--harness-path", "/run/kekkai-p3-03-test/kekkai_png_harness"])
+            harness_arg = argv.index("--harness-path")
+            input_arg = argv.index("--input-path")
+            self.assertEqual(argv[harness_arg + 1], "/run/kekkai-p3-03-test/kekkai_png_harness")
+            self.assertEqual(argv[input_arg + 1], "/run/kekkai-p3-03-test/input.bin")
+            self.assertEqual(MANAGER_AUTHORIZATION_TOKEN, b"\\x01")
+            self.assertEqual(GUARD_AUTHORIZATION_TOKEN, b"\\x01")
 
 
 class SanitizerMigrationTests(unittest.TestCase):
@@ -276,6 +294,82 @@ class SanitizerMigrationTests(unittest.TestCase):
                 )
             finally:
                 connection.close()
+
+    def test_stream_copy_failure_does_not_skip_the_other_stream(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            attempt = root / "attempt"
+            runtime.mkdir()
+            attempt.mkdir()
+            from engine.evidence import sanitizer
+            with patch.object(
+                sanitizer,
+                "_copy_service_stream",
+                side_effect=[
+                    SanitizerCollectionError("stdout read failed"),
+                    (b"stderr", attempt / "stderr.bin"),
+                ],
+            ) as copy:
+                stdout, stderr = _copy_service_streams(runtime, attempt)
+            self.assertEqual(copy.call_count, 2)
+            self.assertEqual(stdout, (None, None, "stdout read failed"))
+            self.assertEqual(stderr, (b"stderr", attempt / "stderr.bin", None))
+
+    def test_wait_for_guard_ready_requires_the_preexec_barrier(self):
+        process = SimpleNamespace(poll=lambda: None)
+        ready = {
+            "schema_version": 1,
+            "guard_state": "awaiting_manager_authorization",
+            "harness_exec_succeeded": False,
+        }
+        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
+            "engine.evidence.sanitizer._read_guard_status", return_value=ready
+        ):
+            status, error = _wait_for_guard_ready(process, Path("/run/p3-ready"), timeout=0.1)
+        self.assertEqual(status, ready)
+        self.assertIsNone(error)
+
+    def test_wait_for_guard_ready_does_not_authorize_on_a_guard_refusal(self):
+        process = SimpleNamespace(poll=lambda: None)
+        refused = {
+            "schema_version": 1,
+            "guard_state": "preflight_blocked",
+            "detail": "effective CPU quota missing",
+        }
+        with patch("engine.evidence.sanitizer._sudo", return_value=subprocess.CompletedProcess([], 0, b"", b"")), patch(
+            "engine.evidence.sanitizer._read_guard_status", return_value=refused
+        ):
+            status, error = _wait_for_guard_ready(process, Path("/run/p3-refused"), timeout=0.1)
+        self.assertEqual(status, refused)
+        self.assertIn("effective CPU quota missing", error)
+
+    def test_final_systemd_inspection_failure_is_not_cleanup_success(self):
+        with patch(
+            "engine.evidence.sanitizer._sudo",
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
+        ), patch(
+            "engine.evidence.sanitizer._systemd_show",
+            return_value={"show_error": "permission denied"},
+        ):
+            okay, detail, final = _stop_and_verify_service("kekkai-p3-03-test", {})
+        self.assertFalse(okay)
+        self.assertIn("unverified", detail)
+        self.assertIn("show_error", final)
+
+    def test_identity_mismatch_prevents_positive_assessment(self):
+        families, assessment = _classify_output(
+            b"",
+            b"ERROR: AddressSanitizer: heap-use-after-free",
+            {
+                "harness_exec_succeeded": True,
+                "execution_status": "exited",
+                "exit_code": 0,
+                "execution_identity_verified": False,
+            },
+        )
+        self.assertEqual(families, [])
+        self.assertEqual(assessment, "inconclusive")
 
     def test_systemd_properties_parse_without_truncating_values(self):
         parsed = _parse_properties(
