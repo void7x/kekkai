@@ -178,6 +178,9 @@ class SanitizerClassificationTests(unittest.TestCase):
 
     def test_systemd_property_verification_requires_the_exact_unit_policy(self):
         properties = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "running",
             "Type": "exec",
             "DynamicUser": "yes",
             "NoNewPrivileges": "yes",
@@ -213,7 +216,7 @@ class SanitizerClassificationTests(unittest.TestCase):
         self.assertEqual(_resource_policy()["tasks_max"], 32)
         self.assertEqual(_resource_policy()["kill_mode"], "control-group")
 
-    def test_systemd_command_is_non_shell_and_uses_service_pipe_without_wait_flag(self):
+    def test_systemd_command_uses_read_only_staging_paths_and_service_pipe(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             testcase = root / "input.bin"
@@ -234,6 +237,9 @@ class SanitizerClassificationTests(unittest.TestCase):
             self.assertIn("--pipe", argv)
             self.assertIn("--remain-after-exit", argv)
             self.assertNotIn("--wait", argv)
+            self.assertTrue(any(item.startswith("--property=BindReadOnlyPaths=") and ":/run/" in item for item in argv))
+            self.assertIn("--input-path", argv)
+            self.assertNotIn("LoadCredential=input:", " ".join(argv))
             self.assertIn("--property=MemoryMax=1G", argv)
             self.assertIn("--property=MemorySwapMax=0", argv)
             self.assertIn("--property=CPUQuota=60%", argv)
