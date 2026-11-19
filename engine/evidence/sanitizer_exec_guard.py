@@ -23,6 +23,7 @@ from typing import Any
 
 MAX_INPUT_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MANAGER_AUTHORIZATION_TOKEN = b"\x01"
 READ_CHUNK = 64 * 1024
 HARNESS_PATH = "/run/kekkai-harness/kekkai_png_harness"
 RUNTIME_FILES = ("status.json", "status.tmp", "stdout.bin", "stderr.bin")
@@ -348,7 +349,7 @@ def main() -> int:
         status["manager_authorization_received"] = False
         write_status(runtime, status)
         authorization = sys.stdin.buffer.read(1)
-        if authorization != b"\x01":
+        if authorization != MANAGER_AUTHORIZATION_TOKEN:
             status["detail"] = "System-manager authorization was not received; harness was not executed."
             status["guard_state"] = "manager_authorization_refused"
             write_status(runtime, status)
