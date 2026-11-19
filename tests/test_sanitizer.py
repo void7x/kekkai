@@ -30,7 +30,10 @@ from engine.evidence.sanitizer import (
     STAGING_AUTHORIZATION_TOKEN,
     MANAGER_AUTHORIZATION_TOKEN,
     SanitizerCollectionError,
+    collect_sanitizer_evidence,
     _GuardEventChannel,
+    _apply_guard_event_channel_error,
+    _should_cleanup_root_stages_after_exception,
     _deliver_manager_authorization,
     _classify_output,
     _close_process_stdin,
@@ -95,6 +98,39 @@ class SanitizerProtocolRegressionTests(unittest.TestCase):
         self.assertEqual(_staged_permissions("guard"), (0o444, 0o400))
         with self.assertRaises(SanitizerCollectionError):
             _staged_permissions("unexpected")
+
+    def test_event_channel_error_downgrades_capture_after_guard_details_are_initialized(self):
+        stdout, stderr, stdout_detail, stderr_detail = _apply_guard_event_channel_error(
+            "complete",
+            "complete",
+            None,
+            "guard stderr detail",
+            execution_succeeded=True,
+            channel_error="SanitizerCollectionError: truncated event frame",
+        )
+        self.assertEqual((stdout, stderr), ("read_failed", "read_failed"))
+        self.assertEqual(stdout_detail, "SanitizerCollectionError: truncated event frame")
+        self.assertEqual(stderr_detail, "guard stderr detail")
+
+    def test_exception_cleanup_retains_root_stages_after_possible_authorization(self):
+        self.assertFalse(_should_cleanup_root_stages_after_exception(
+            cleanup_finalized=False,
+            launch_requested=True,
+            service_cleanup_confirmed=True,
+            manager_authorization_may_be_delivered=True,
+        ))
+        self.assertTrue(_should_cleanup_root_stages_after_exception(
+            cleanup_finalized=False,
+            launch_requested=True,
+            service_cleanup_confirmed=True,
+            manager_authorization_may_be_delivered=False,
+        ))
+        self.assertFalse(_should_cleanup_root_stages_after_exception(
+            cleanup_finalized=False,
+            launch_requested=True,
+            service_cleanup_confirmed=False,
+            manager_authorization_may_be_delivered=False,
+        ))
 
     def test_final_authorization_without_durable_exec_ack_is_uncertain(self):
         self.assertFalse(_execution_outcome_unknown(False, None))
@@ -757,6 +793,258 @@ class SanitizerMigrationTests(unittest.TestCase):
             "stderr_detail": None,
             "recorded_at": finished,
         }
+
+    def test_mocked_successful_collector_orchestration_publishes_evidence(self):
+        import hashlib
+        import shutil
+        from engine.evidence import sanitizer as sanitizer_module
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "evidence"
+            root.mkdir(mode=0o700)
+            project = base / "project"
+            project.mkdir(mode=0o700)
+            source_dir = project / "source"
+            campaign_dir = project / "campaign"
+            fuzz_build_dir = project / "fuzz-build"
+            diagnostic_build_dir = project / "diagnostic-build"
+            for directory in (source_dir, campaign_dir, fuzz_build_dir, diagnostic_build_dir):
+                directory.mkdir(mode=0o700)
+
+            with EvidenceStore(root):
+                pass
+            run_migrations(root)
+            connection = open_database(root / "db" / "kekkai.db")
+            original_bytes = b"harmless imported testcase evidence"
+            harness = project / "diagnostic-harness"
+            harness.write_bytes(b"mock diagnostic harness executable")
+            harness.chmod(0o700)
+            original_sha = hashlib.sha256(original_bytes).hexdigest()
+            harness_sha = hashlib.sha256(harness.read_bytes()).hexdigest()
+            try:
+                _, ids = self._insert_parent_evidence(connection, root)
+                connection.execute(
+                    "UPDATE artifacts SET sha256=?, size_bytes=?, storage_relpath=? WHERE id=?",
+                    (
+                        original_sha,
+                        len(original_bytes),
+                        f"objects/sha256/{original_sha[:2]}/{original_sha[2:4]}/{original_sha}.bin",
+                        ids["artifact_id"],
+                    ),
+                )
+                connection.execute(
+                    "UPDATE target_versions SET source_dir_recorded=? WHERE id=?",
+                    (str(source_dir), ids["target_version_id"]),
+                )
+                connection.execute(
+                    "UPDATE campaigns SET campaign_dir=? WHERE id=?",
+                    (str(campaign_dir), ids["campaign_id"]),
+                )
+                connection.execute(
+                    "UPDATE builds SET build_dir=? WHERE id=?",
+                    (str(fuzz_build_dir), ids["source_build_id"]),
+                )
+                connection.execute(
+                    "UPDATE builds SET build_dir=?, harness_binary_path=?, harness_binary_sha256=?, "
+                    "sanitizer_config_json=? WHERE id=?",
+                    (
+                        str(diagnostic_build_dir),
+                        str(harness),
+                        harness_sha,
+                        '{"address":"enabled","frame_pointers":true,"undefined_behavior":"enabled"}',
+                        ids["diagnostic_build_id"],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            staging_root = base / "staging"
+            staging_root.mkdir(mode=0o700)
+            service_properties = {
+                "MainPID": "4242",
+                "ControlGroup": "/system.slice/kekkai-p3-03-test.service",
+            }
+            execution_start = "2026-11-19T10:00:01.000000Z"
+            execution_finish = "2026-11-19T10:00:02.000000Z"
+
+            class FakeProcess:
+                def __init__(self):
+                    self.stdin = io.BytesIO()
+                    self.stdout = io.BytesIO()
+                    self.stderr = io.BytesIO()
+                    self.returncode = 0
+
+                def poll(self):
+                    return self.returncode
+
+                def communicate(self, timeout=None):
+                    return b"", b""
+
+                def kill(self):
+                    self.returncode = -9
+
+            class FakeEventChannel:
+                def __init__(self, attempt_dir):
+                    self.attempt_dir = attempt_dir
+                    self.error = None
+                    self.stream_truncated = {b"O": False, b"E": False}
+                    self.private_ready = {
+                        "schema_version": 1,
+                        "guard_state": "awaiting_private_staging",
+                        "harness_exec_succeeded": False,
+                    }
+                    self.manager_ready = {
+                        "schema_version": 1,
+                        "guard_state": "awaiting_manager_authorization",
+                        "harness_exec_succeeded": False,
+                    }
+                    self.finished = {
+                        "schema_version": 1,
+                        "guard_state": "finished",
+                        "manager_authorization_received": True,
+                        "harness_exec_succeeded": True,
+                        "execution_status": "exited",
+                        "execution_started_at": execution_start,
+                        "execution_finished_at": execution_finish,
+                        "exit_code": 0,
+                        "signal_number": None,
+                        "stdout": {"capture_state": "complete", "truncated": False, "detail": None},
+                        "stderr": {"capture_state": "complete", "truncated": False, "detail": None},
+                        "harness_argv": [str(harness)],
+                        "harness_environment": {"LC_ALL": "C"},
+                    }
+
+                def start(self, process):
+                    process.stdout = None
+
+                def wait_for_state(self, expected_state, timeout):
+                    if expected_state == "awaiting_private_staging":
+                        return dict(self.private_ready), None
+                    if expected_state == "awaiting_manager_authorization":
+                        return dict(self.manager_ready), None
+                    return None, "unexpected test barrier"
+
+                def wait_for_terminal(self, timeout):
+                    return dict(self.finished), None
+
+                def snapshot(self):
+                    return dict(self.finished)
+
+                def join(self, timeout=2.0):
+                    return None
+
+                def stream_result(self, kind):
+                    if kind == b"O":
+                        raw, name = b"harmless stdout", "stdout.bin"
+                    else:
+                        raw, name = b"harmless stderr", "stderr.bin"
+                    path = self.attempt_dir / name
+                    path.write_bytes(raw)
+                    path.chmod(0o600)
+                    return raw, path, None
+
+            def fake_sudo(argv, **kwargs):
+                return_code = 0
+                if len(argv) >= 2 and argv[0] == "/usr/bin/test" and argv[1] in ("-e", "-d"):
+                    return_code = 1
+                return subprocess.CompletedProcess(argv, return_code, b"", b"")
+
+            def fake_stage(source, destination, expected_sha256, maximum):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                role = destination.name.rsplit("-", 1)[-1]
+                destination.chmod(sanitizer_module._staged_permissions(role)[0])
+                digest, size = sanitizer_module._hash_regular_file(destination, maximum)
+                if digest != expected_sha256:
+                    raise AssertionError("mock stage received an unexpected source digest")
+                return digest, size
+
+            def fake_handoff(paths, properties):
+                for path in paths:
+                    role = path.name.rsplit("-", 1)[-1]
+                    path.chmod(sanitizer_module._staged_permissions(role)[1])
+                return os.getuid(), os.getgid()
+
+            def fake_root_hash(path, maximum, expected_uid, expected_mode=0o400):
+                info = path.stat(follow_symlinks=False)
+                if (
+                    info.st_uid != expected_uid
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != expected_mode
+                ):
+                    raise SanitizerCollectionError("mock staged identity verification failed")
+                return sanitizer_module._hash_regular_file(path, maximum)
+
+            def fake_root_cleanup(paths, expected_uid=None):
+                for path in paths:
+                    path.unlink(missing_ok=True)
+                return True, None
+
+            fake_verification = SimpleNamespace(
+                passed=True, missing=(), corrupt=(), unreferenced=(), stale_staging=()
+            )
+            fake_process = FakeProcess()
+            successful_properties = {"passed": True, "issues": []}
+            with patch.object(sanitizer_module, "_ROOT_STAGING_DIRECTORY", staging_root), \
+                 patch.object(sanitizer_module, "_verify_diagnostic_build", return_value=(harness, {})), \
+                 patch.object(sanitizer_module, "_trusted_system_executable", side_effect=lambda path: Path(path)), \
+                 patch.object(sanitizer_module, "_load_systemd_version", return_value="systemd test"), \
+                 patch.object(sanitizer_module, "_load_wsl_version", return_value="WSL test"), \
+                 patch.object(sanitizer_module, "_sudo", side_effect=fake_sudo), \
+                 patch.object(sanitizer_module, "_stage_root_file", side_effect=fake_stage), \
+                 patch.object(sanitizer_module, "_set_root_staged_owner", side_effect=fake_handoff), \
+                 patch.object(sanitizer_module, "_root_hash_regular_file", side_effect=fake_root_hash), \
+                 patch.object(sanitizer_module, "_remove_root_staged_files", side_effect=fake_root_cleanup), \
+                 patch.object(sanitizer_module, "_systemd_show", return_value=service_properties), \
+                 patch.object(sanitizer_module, "_verify_systemd_properties", return_value=successful_properties), \
+                 patch.object(sanitizer_module, "_stop_and_verify_service", return_value=(True, None, {"Result": "success"})), \
+                 patch.object(sanitizer_module, "_GuardEventChannel", FakeEventChannel), \
+                 patch.object(sanitizer_module.subprocess, "Popen", return_value=fake_process), \
+                 patch.object(EvidenceStore, "verify_evidence_store", return_value=fake_verification), \
+                 patch.object(EvidenceStore, "read_verified_artifact", return_value=original_bytes):
+                result = collect_sanitizer_evidence(
+                    root,
+                    ids["diagnostic_build_id"],
+                    "obs-" + ("8" * 64),
+                    project_root=project,
+                )
+
+            self.assertEqual(result.execution_status, "exited")
+            self.assertEqual(result.assessment, "no_signature_observed")
+            self.assertIsNone(result.recovery_path)
+            self.assertFalse(list(staging_root.iterdir()))
+
+            committed = open_database(root / "db" / "kekkai.db")
+            try:
+                row = committed.execute(
+                    "SELECT execution_status, harness_exec_succeeded, assessment, "
+                    "stdout_capture_state, stdout_publication_state, "
+                    "stderr_capture_state, stderr_publication_state "
+                    "FROM sanitizer_runs WHERE id=?",
+                    (result.database_row_id,),
+                ).fetchone()
+                self.assertEqual(
+                    row,
+                    ("exited", 1, "no_signature_observed", "complete", "published", "complete", "published"),
+                )
+                self.assertEqual(
+                    committed.execute(
+                        "SELECT sha256, size_bytes FROM artifacts WHERE id=?",
+                        (ids["artifact_id"],),
+                    ).fetchone(),
+                    (original_sha, len(original_bytes)),
+                )
+                self.assertEqual(
+                    committed.execute(
+                        "SELECT count(*) FROM sanitizer_runs WHERE observation_id=?",
+                        (ids["observation_id"],),
+                    ).fetchone()[0],
+                    1,
+                )
+            finally:
+                committed.close()
 
     def test_fresh_database_applies_immutable_sanitizer_schema(self):
         with tempfile.TemporaryDirectory() as temporary:

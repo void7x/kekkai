@@ -43,6 +43,7 @@ PYTHON = Path("/usr/bin/python3")
 GUARD_SOURCE = Path(__file__).with_name("sanitizer_exec_guard.py")
 STAGING_AUTHORIZATION_TOKEN = bytes([1])
 MANAGER_AUTHORIZATION_TOKEN = bytes([2])
+_ROOT_STAGING_DIRECTORY = Path("/run")
 
 
 class SanitizerCollectionError(RuntimeError):
@@ -1328,6 +1329,42 @@ def _execution_outcome_unknown(
     )
 
 
+
+def _apply_guard_event_channel_error(
+    stdout_capture: str,
+    stderr_capture: str,
+    stdout_detail: str | None,
+    stderr_detail: str | None,
+    *,
+    execution_succeeded: bool,
+    channel_error: str | None,
+) -> tuple[str, str, str | None, str | None]:
+    """Downgrade both captures when the trusted control channel is incomplete."""
+    if not execution_succeeded or not channel_error:
+        return stdout_capture, stderr_capture, stdout_detail, stderr_detail
+    return (
+        "read_failed",
+        "read_failed",
+        stdout_detail or channel_error,
+        stderr_detail or channel_error,
+    )
+
+
+def _should_cleanup_root_stages_after_exception(
+    *,
+    cleanup_finalized: bool,
+    launch_requested: bool,
+    service_cleanup_confirmed: bool,
+    manager_authorization_may_be_delivered: bool,
+) -> bool:
+    """Only pre-authorization attempts may discard root stages in exceptional cleanup."""
+    return (
+        not cleanup_finalized
+        and (not launch_requested or service_cleanup_confirmed)
+        and not manager_authorization_may_be_delivered
+    )
+
+
 def _classify_output(stdout: bytes, stderr: bytes, status: dict[str, Any]) -> tuple[list[str], str]:
     families: set[str] = set()
     identity_verified = status.get("execution_identity_verified") is True
@@ -1536,6 +1573,7 @@ def collect_sanitizer_evidence(
     systemd_process: subprocess.Popen | None = None
     event_channel: _GuardEventChannel | None = None
     launch_requested = False
+    manager_authorization_may_be_delivered = False
     service_finalization_attempted = False
     service_cleanup_confirmed = False
     root_staged_files: list[Path] = []
@@ -1691,9 +1729,9 @@ def collect_sanitizer_evidence(
             )
 
         stage_prefix = "kekkai-p3-03-stage-" + run_uid.replace("-", "")
-        root_input = Path("/run") / (stage_prefix + "-input")
-        root_harness = Path("/run") / (stage_prefix + "-harness")
-        root_guard = Path("/run") / (stage_prefix + "-guard")
+        root_input = _ROOT_STAGING_DIRECTORY / (stage_prefix + "-input")
+        root_harness = _ROOT_STAGING_DIRECTORY / (stage_prefix + "-harness")
+        root_guard = _ROOT_STAGING_DIRECTORY / (stage_prefix + "-guard")
         registered_harness_sha256 = str(context["diagnostic_harness_binary_sha256"])
         guard_sha256, _ = _hash_regular_file(guard, 1024 * 1024)
         for source_path, staged_path, digest, maximum in (
@@ -1813,8 +1851,9 @@ def collect_sanitizer_evidence(
                             if preexec_verification["passed"]:
                                 try:
                                     def _mark_manager_authorization_may_be_delivered() -> None:
-                                        nonlocal manager_authorized
+                                        nonlocal manager_authorized, manager_authorization_may_be_delivered
                                         manager_authorized = True
+                                        manager_authorization_may_be_delivered = True
                                         manifest["manager_authorization_state"] = "possibly_delivered"
                                         manifest["manager_authorization_may_have_been_delivered"] = True
                                         _write_manifest(attempt_dir, manifest)
@@ -1994,11 +2033,6 @@ def collect_sanitizer_evidence(
                 result_status = "interrupted"
             if runner_error and exec_succeeded and not exec_finished:
                 result_status = "timed_out" if "bounded service wait" in runner_error else "interrupted"
-            if event_channel is not None and event_channel.error and exec_succeeded:
-                stdout_capture = "read_failed"
-                stderr_capture = "read_failed"
-                stdout_detail = stdout_detail or event_channel.error
-                stderr_detail = stderr_detail or event_channel.error
             if exec_succeeded and result_status in ("exited", "signaled", "timed_out", "interrupted"):
                 exec_started = exec_started or attempt_started
                 exec_finished = exec_finished or _now()
@@ -2018,6 +2052,20 @@ def collect_sanitizer_evidence(
             stderr_truncated = int(bool(guard_status.get("stderr", {}).get("truncated", False)))
             stdout_detail = guard_status.get("stdout", {}).get("detail")
             stderr_detail = guard_status.get("stderr", {}).get("detail")
+
+        (
+            stdout_capture,
+            stderr_capture,
+            stdout_detail,
+            stderr_detail,
+        ) = _apply_guard_event_channel_error(
+            stdout_capture,
+            stderr_capture,
+            stdout_detail,
+            stderr_detail,
+            execution_succeeded=exec_succeeded,
+            channel_error=event_channel.error if event_channel is not None else None,
+        )
 
         # A stream advertised as captured must have a safely copied regular file.
         if exec_succeeded and stdout_stage is None:
@@ -2424,7 +2472,12 @@ def collect_sanitizer_evidence(
                         pass
         # Root-owned staged files are removed only after the attempt service is
         # positively absent or its complete cgroup is known empty.
-        if root_staged_files and not root_stage_cleanup_finalized and (not launch_requested or service_cleanup_confirmed):
+        if root_staged_files and _should_cleanup_root_stages_after_exception(
+            cleanup_finalized=root_stage_cleanup_finalized,
+            launch_requested=launch_requested,
+            service_cleanup_confirmed=service_cleanup_confirmed,
+            manager_authorization_may_be_delivered=manager_authorization_may_be_delivered,
+        ):
             try:
                 removed, removal_detail = _remove_root_staged_files(
                     root_staged_files, expected_uid=root_staged_uid
@@ -2432,6 +2485,7 @@ def collect_sanitizer_evidence(
                 if not removed and attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
                     attempt_manifest.update({
                         "state": "root_stage_cleanup_unverified",
+                        "root_stage_cleanup_state": "unverified",
                         "root_stage_cleanup_detail": removal_detail,
                     })
                     _write_manifest(attempt_dir, attempt_manifest)
@@ -2439,12 +2493,33 @@ def collect_sanitizer_evidence(
                 if attempt_manifest is not None and attempt_dir is not None and attempt_dir.exists():
                     attempt_manifest.update({
                         "state": "root_stage_cleanup_unverified",
+                        "root_stage_cleanup_state": "unverified",
                         "root_stage_cleanup_detail": f"{type(cleanup_exc).__name__}: {cleanup_exc}"[:1024],
                     })
                     try:
                         _write_manifest(attempt_dir, attempt_manifest)
                     except OSError:
                         pass
+        elif (
+            root_staged_files
+            and not root_stage_cleanup_finalized
+            and manager_authorization_may_be_delivered
+            and attempt_manifest is not None
+            and attempt_dir is not None
+            and attempt_dir.exists()
+        ):
+            attempt_manifest.update({
+                "root_stage_cleanup_state": "retained_possible_execution",
+                "root_stage_cleanup_detail": (
+                    "Final manager authorization may have been delivered; exceptional cleanup "
+                    "cannot establish non-execution, so root-staged evidence was retained."
+                ),
+                "root_staged_files": [str(item) for item in root_staged_files],
+            })
+            try:
+                _write_manifest(attempt_dir, attempt_manifest)
+            except OSError:
+                pass
         if previous_sigterm_handler is not None:
             try:
                 signal.signal(signal.SIGTERM, previous_sigterm_handler)
