@@ -441,9 +441,11 @@ def prepare_libpng_seed_corpus(
     if missing or unexpected:
         details = []
         if missing:
-            details.append("missing: " + ", ".join(missing))
+            details.append(
+                "missing required pilot seeds: " + ", ".join(missing)
+            )
         if unexpected:
-            details.append("unexpected: " + ", ".join(unexpected))
+            details.append("unexpected entries: " + ", ".join(unexpected))
         raise SeedCorpusError(
             "Original seed corpus must contain exactly the ten approved pilot seeds ("
             + "; ".join(details)
