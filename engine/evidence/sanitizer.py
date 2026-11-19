@@ -1469,10 +1469,12 @@ def collect_sanitizer_evidence(
         runner_error: str | None = None
         manager_authorized = False
         preexec_properties: dict[str, str] = {}
+        staging_properties: dict[str, str] = {}
         preexec_verification: dict[str, Any] = {
             "passed": False,
             "issues": ["Manager properties have not yet been inspected."],
         }
+
         def _interrupt_service(signum, frame):
             raise KeyboardInterrupt(f"collector interrupted by signal {signum}")
 
@@ -1492,33 +1494,81 @@ def collect_sanitizer_evidence(
                 bufsize=0,
             )
             ready_status, ready_error = _wait_for_guard_ready(
-                systemd_process, runtime_dir, timeout=3.0
+                systemd_process, runtime_dir, "awaiting_private_staging", timeout=3.0
             )
-            if ready_status is None or ready_status.get("guard_state") != "awaiting_manager_authorization":
-                runner_error = ready_error or "Guard did not reach the pre-exec authorization barrier."
+            if ready_status is None or ready_status.get("guard_state") != "awaiting_private_staging":
+                runner_error = ready_error or "Guard did not reach the private-staging barrier."
             else:
-                preexec_properties = _systemd_show(unit)
-                preexec_verification = _verify_systemd_properties(preexec_properties)
-                if "show_error" in preexec_properties:
-                    preexec_verification = {
-                        "passed": False,
-                        "issues": ["System-manager inspection failed before harness authorization."],
-                    }
-                if preexec_verification["passed"]:
+                staging_properties = _systemd_show(unit)
+                staging_verification = _verify_systemd_properties(staging_properties)
+                if "show_error" in staging_properties or not staging_verification["passed"]:
+                    runner_error = (
+                        "System-manager verification failed before private staging access: "
+                        + "; ".join(staging_verification["issues"])
+                    )
+                else:
                     try:
+                        root_staged_uid, root_staged_gid = _set_root_staged_owner(
+                            root_staged_files, staging_properties
+                        )
+                        manifest.update({
+                            "root_staged_uid": root_staged_uid,
+                            "root_staged_gid": root_staged_gid,
+                            "dynamic_user_cgroup": staging_properties.get("ControlGroup"),
+                            "private_staging_owner_verified": True,
+                        })
+                        _write_manifest(attempt_dir, manifest)
                         if systemd_process.stdin is None:
                             raise BrokenPipeError("systemd-run stdin pipe is unavailable")
-                        systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
+                        systemd_process.stdin.write(STAGING_AUTHORIZATION_TOKEN)
                         systemd_process.stdin.flush()
-                        systemd_process.stdin.close()
-                        manager_authorized = True
-                    except (BrokenPipeError, OSError, ValueError) as exc:
-                        runner_error = f"Could not deliver manager authorization: {type(exc).__name__}: {exc}"
-                else:
-                    runner_error = (
-                        "System-manager property verification failed before harness authorization: "
-                        + "; ".join(preexec_verification["issues"])
-                    )
+                    except (SanitizerCollectionError, BrokenPipeError, OSError, ValueError) as exc:
+                        runner_error = (
+                            f"Private staging authorization failed: {type(exc).__name__}: {exc}"
+                        )
+
+                    if runner_error is None:
+                        ready_status, ready_error = _wait_for_guard_ready(
+                            systemd_process, runtime_dir,
+                            "awaiting_manager_authorization", timeout=3.0
+                        )
+                        if ready_status is None or ready_status.get("guard_state") != "awaiting_manager_authorization":
+                            runner_error = ready_error or "Guard did not verify staged identities before the execution barrier."
+                        else:
+                            preexec_properties = _systemd_show(unit)
+                            preexec_verification = _verify_systemd_properties(preexec_properties)
+                            if "show_error" in preexec_properties:
+                                preexec_verification = {
+                                    "passed": False,
+                                    "issues": ["System-manager inspection failed before harness authorization."],
+                                }
+                            stable_manager_identity = (
+                                preexec_properties.get("MainPID") == staging_properties.get("MainPID")
+                                and preexec_properties.get("ControlGroup") == staging_properties.get("ControlGroup")
+                            )
+                            if not stable_manager_identity:
+                                preexec_verification = {
+                                    "passed": False,
+                                    "issues": ["Service MainPID or cgroup changed during pre-exec verification."],
+                                }
+                            if preexec_verification["passed"]:
+                                try:
+                                    if systemd_process.stdin is None:
+                                        raise BrokenPipeError("systemd-run stdin pipe is unavailable")
+                                    systemd_process.stdin.write(MANAGER_AUTHORIZATION_TOKEN)
+                                    systemd_process.stdin.flush()
+                                    systemd_process.stdin.close()
+                                    manager_authorized = True
+                                except (BrokenPipeError, OSError, ValueError) as exc:
+                                    runner_error = (
+                                        f"Could not deliver harness authorization: {type(exc).__name__}: {exc}"
+                                    )
+                            else:
+                                runner_error = (
+                                    "System-manager property verification failed before harness authorization: "
+                                    + "; ".join(preexec_verification["issues"])
+                                )
+
             if not manager_authorized:
                 if systemd_process.stdin is not None and not systemd_process.stdin.closed:
                     systemd_process.stdin.close()
