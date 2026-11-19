@@ -537,13 +537,13 @@ class SanitizerMigrationTests(unittest.TestCase):
                 sanitizer,
                 "_copy_service_stream",
                 side_effect=[
-                    SanitizerCollectionError("stdout read failed"),
+                    OSError("stdout stage write failed"),
                     (b"stderr", attempt / "stderr.bin"),
                 ],
             ) as copy:
                 stdout, stderr = _copy_service_streams(runtime, attempt)
             self.assertEqual(copy.call_count, 2)
-            self.assertEqual(stdout, (None, None, "stdout read failed"))
+            self.assertEqual(stdout, (None, None, "OSError: stdout stage write failed"))
             self.assertEqual(stderr, (b"stderr", attempt / "stderr.bin", None))
 
     def test_wait_for_guard_ready_requires_the_preexec_barrier(self):
