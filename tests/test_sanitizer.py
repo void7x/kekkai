@@ -797,6 +797,7 @@ class SanitizerMigrationTests(unittest.TestCase):
     def test_mocked_successful_collector_orchestration_publishes_evidence(self):
         import hashlib
         import shutil
+        import stat
         from engine.evidence import sanitizer as sanitizer_module
 
         with tempfile.TemporaryDirectory() as temporary:
