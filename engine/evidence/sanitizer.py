@@ -1474,6 +1474,7 @@ def _record_blocked(
     started_at: str,
     manifest: dict[str, Any],
     *,
+    diagnostic_build_id: int,
     detail: str,
     unit: str | None,
     recovery_path: Path,
@@ -1488,7 +1489,7 @@ def _record_blocked(
         "source_build_id": context["source_build_id"],
         "campaign_id": context["campaign_id"],
         "observation_id": context["observation_id"],
-        "diagnostic_build_id": context["diagnostic_build_id"],
+        "diagnostic_build_id": diagnostic_build_id,
         "original_artifact_id": context["original_artifact_id"],
         "policy_id": POLICY_ID,
         "argv_json": [],
@@ -1695,6 +1696,7 @@ def collect_sanitizer_evidence(
         except SanitizerCollectionError as exc:
             return _record_blocked(
                 repository, connection, context, run_uid, attempt_started, manifest,
+                diagnostic_build_id=diagnostic_build_id,
                 detail=str(exc), unit=None, recovery_path=attempt_dir,
                 runtime_observation=runtime_observation,
             )
@@ -1705,12 +1707,14 @@ def collect_sanitizer_evidence(
         except SanitizerCollectionError as exc:
             return _record_blocked(
                 repository, connection, context, run_uid, attempt_started, manifest,
+                diagnostic_build_id=diagnostic_build_id,
                 detail=str(exc), unit=None, recovery_path=attempt_dir,
                 runtime_observation=runtime_observation,
             )
         if authorization.returncode != 0:
             return _record_blocked(
                 repository, connection, context, run_uid, attempt_started, manifest,
+                diagnostic_build_id=diagnostic_build_id,
                 detail="Non-interactive sudo authorization unavailable; run sudo -v and retry.",
                 unit=None, recovery_path=attempt_dir, runtime_observation=runtime_observation,
             )
@@ -1718,12 +1722,14 @@ def collect_sanitizer_evidence(
         if runtime_collision.returncode == 0:
             return _record_blocked(
                 repository, connection, context, run_uid, attempt_started, manifest,
+                diagnostic_build_id=diagnostic_build_id,
                 detail="The unique systemd RuntimeDirectory already exists; refusing to reuse it.",
                 unit=None, recovery_path=attempt_dir, runtime_observation=runtime_observation,
             )
         if runtime_collision.returncode != 1:
             return _record_blocked(
                 repository, connection, context, run_uid, attempt_started, manifest,
+                diagnostic_build_id=diagnostic_build_id,
                 detail="Could not prove that the unique systemd RuntimeDirectory is absent.",
                 unit=None, recovery_path=attempt_dir, runtime_observation=runtime_observation,
             )
@@ -2280,7 +2286,7 @@ def collect_sanitizer_evidence(
             "source_build_id": context["source_build_id"],
             "campaign_id": context["campaign_id"],
             "observation_id": context["observation_id"],
-            "diagnostic_build_id": context["diagnostic_build_id"],
+            "diagnostic_build_id": diagnostic_build_id,
             "original_artifact_id": context["original_artifact_id"],
             "policy_id": POLICY_ID,
             "argv_json": (
