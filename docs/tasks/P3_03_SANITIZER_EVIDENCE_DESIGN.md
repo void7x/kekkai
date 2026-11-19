@@ -150,7 +150,9 @@ The successful WSL feasibility probe on 2026-11-18 used:
 
 The above confirms this mechanism on the tested WSL instance. The implementation must still check every requested property, including CPU quota, read its effective value inside the guard, and fail closed when any requested property is unavailable.
 
-Use service Type=exec and `systemd-run --system --pipe --wait --collect`. The fixed policy requests:
+Use service Type=exec and `systemd-run --system --quiet --pipe --remain-after-exit --unit=<unique-unit> --service-type=exec`. Do not add `--wait` or `--collect` to this lifecycle. `--pipe` connects the collector's stdin/stdout/stderr to the service and waits for the transient service to terminate. `RemainAfterExit=yes` keeps the unit available after the guard process exits so the collector can inspect its final result and preserved runtime files. The collector polls the guard's durable status, explicitly stops only this attempt's unit, then collects the `systemd-run` pipe result and final manager properties. It calls `systemctl clean --what=runtime` and `systemctl reset-failed` only after the service subtree is verified empty and both streams have durable copies. Any failed inspection or cleanup retains attempt resources and recovery metadata.
+
+The fixed policy requests:
 
 - `DynamicUser=yes`.
 - `ProtectControlGroups=strict`, `NoNewPrivileges=yes`, empty `CapabilityBoundingSet=`, and `Delegate=no`.
@@ -164,17 +166,24 @@ Use service Type=exec and `systemd-run --system --pipe --wait --collect`. The fi
 
 CPUQuota=60% limits the service to roughly 60% of one CPU. Together with the five-second service runtime ceiling, this is approximately three CPU-seconds, subject to kernel quota-period accounting. It is a cgroup-wide rate limit, not a per-process RLIMIT_CPU guarantee. Memory and swap are separate controls and both must be read back.
 
-Use `LoadCredential=` for the original testcase and trusted guard script, and bind-mount the verified harness binary read-only into a service-owned runtime directory. Do not make the recovery directory or original testcase world-readable. Credential sources must be stable regular files owned by the operator; systemd loads them before service execution. The target receives only the input credential path as its single argument. No repository, campaign, evidence database, evidence-store object tree or host home directory is bind-mounted writable into the service.
+Do not use `LoadCredential=` for the testcase: the systemd v257 accumulated credential-size ceiling is 1 MiB per unit, below the approved 8 MiB input limit. Instead, after the testcase, harness and guard have been verified in the unprivileged collector, copy each into a unique root-owned file directly under `/run` using a fixed privileged helper. Each copy is opened exclusively with no-follow semantics, checked as a regular file, hashed while copying, compared with the expected digest and size, set to mode `0400`, and fsynced with its parent directory. The root staging names include the fresh attempt UID and have fixed `input`, `harness` or `guard` suffixes.
+
+The service uses `BindReadOnlyPaths=` for all three staged files, placing them at fixed paths inside its private `RuntimeDirectory`. The root-owned staged files are not world-readable. After systemd starts the service as a DynamicUser, the guard first completes its resource checks and waits at a private-staging barrier. The collector reads back the service's `MainPID`, `ControlGroup` and complete requested manager policy. A fixed privileged helper confirms that the PID is still in that exact cgroup, obtains its effective non-root UID/GID, and transfers ownership of only the three attempt-owned staging files to that UID/GID while retaining mode `0400`. The helper fsyncs the files and `/run`; the collector records this identity handoff in the recovery manifest before releasing the guard.
+
+The guard then hashes the bound harness and testcase against the registered harness digest and immutable original-artifact digest, and verifies from `/proc/self/mountinfo` that the guard, harness and testcase are mounted read-only. It signals a second pre-exec barrier. The collector reads back all requested unit properties again and requires the same `MainPID` and `ControlGroup` as the first check. Only after both the guard's effective cgroup/file checks and the manager's second property check pass does the collector send the final one-byte authorization token. Any timeout, mismatch, failed inspection, unexpected process identity or closed authorization pipe stops the attempt unit without dispatching the harness.
+
+The target receives only the fixed input path as its single argument. Its stdin is `DEVNULL`; the guard uses the service pipe only for the two authorization bytes. No repository, campaign, evidence database, evidence-store object tree or host home directory is mounted into the service. No writable host path is exposed to the target.
 
 A trusted pre-exec guard runs inside the already constrained service. Before dispatching the harness it verifies:
 
 - `/proc/self/cgroup` is in the service's cgroup namespace; a namespace-relative path of `/` is acceptable and expected with the tested `ProtectControlGroups=strict` setup.
 - The cgroup filesystem is mounted read-only and the visible `cgroup.procs` / `cgroup.threads` controls are not writable by the dynamic workload identity.
 - Actual `memory.max` is finite and no greater than 1 GiB; `memory.swap.max` is exactly zero; `cpu.max` and `pids.max` reflect the approved bounds.
-- The system manager confirms the unit's configured resource properties and that the unit has not been delegated.
+- The system manager confirms the complete unit policy before private staging is released, and confirms it again immediately before final execution authorization. The same active `MainPID` and `ControlGroup` must remain in place across both reads; `Delegate=no` is required.
 - The workload receives no writable cgroup subtree.
+- The guard verifies that its own file, the fixed harness and the fixed testcase are read-only bind mounts, and hashes the harness and testcase after the DynamicUser ownership handoff.
 - RLIMIT_AS inherited by the guard is unlimited. Do not set RLIMIT_AS.
-- A close-on-exec error pipe or equivalent handshake distinguishes guard refusal, harness exec failure and successful harness exec. Do not record execution as started until exec succeeds.
+- The guard waits at two explicit barriers: private-file verification first, final manager authorization second. No harness process is created before the second token is received. A refusal, timeout or EOF at either barrier is a preflight block, not a harness execution.
 
 Do not rely on `ProtectControlGroups=yes`; the implementation uses `ProtectControlGroups=strict` on a system service and verifies the read-only cgroup mount inside the process. If the check cannot prove that the workload cannot change its cgroup membership, the gate fails.
 
@@ -191,7 +200,7 @@ The guard execs only the verified harness with the materialized testcase as its 
 - Minimal fixed PATH and LC_ALL=C.
 - If a verified symbolizer is available, record its path and digest. Otherwise set symbolize=0 and disable automatic symbolizer discovery.
 
-Do not inherit LD_PRELOAD, AFL variables, Python/user environment, D-Bus/session values or secret-bearing environment values. Use stdin=DEVNULL, a fixed private working directory and closed unrelated file descriptors. Do not inherit a finite RLIMIT_AS. Disable core dumps through the service policy.
+Do not inherit LD_PRELOAD, AFL variables, Python/user environment, D-Bus/session values or secret-bearing environment values. The harness uses stdin=DEVNULL, a fixed private working directory and closed unrelated file descriptors. The guard records successful harness exec only after `Popen` has returned successfully; launcher/guard errors are kept separate from harness stdout/stderr. Do not inherit a finite RLIMIT_AS. Disable core dumps through the service policy.
 
 Capture stdout and stderr separately. Retain at most 8 MiB per stream. Continue draining after the retention cap and discard excess bytes so the child cannot block on a full pipe. Preserve retained bytes exactly; do not decode before hashing. Record read completion independently from truncation. Reader shutdown/join must be bounded and verified.
 
@@ -203,8 +212,9 @@ Process-group TERM/KILL is secondary only. Use systemd KillMode=control-group to
 2. Allow the configured TERM interval, then require KILL for remaining unit processes.
 3. Wait for cgroup.events to report populated=0.
 4. Verify no descendant remains in the service subtree.
-5. Collect final unit result and resource counters before removing only the attempt-owned unit.
+5. Collect final unit result and resource counters before cleaning the attempt-owned RuntimeDirectory and resetting the transient unit.
 6. Never stop or modify unrelated services, parent cgroups or the user manager.
+7. If the manager inspection fails, do not treat it as proof that the unit is absent. Only a positive `LoadState=not-found` response or a verified inactive/failed unit with an empty or removed cgroup proves that cleanup completed.
 
 If cleanup or populated=0 verification fails, record cleanup_status=failed, retain the manifest and report the exact unit name. Do not claim cleanup succeeded.
 
