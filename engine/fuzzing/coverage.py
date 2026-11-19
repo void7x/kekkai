@@ -519,7 +519,10 @@ def validate_coverage(
 
     cases: list[CoverageCaseResult] = []
     repeat_runs: list[CoverageCaseResult] = []
-    seen_hashes: set[str] = set()
+    baseline_case_names = {
+        case_name for case_name, _filename in LIBPNG_BASE_SEED_CASES
+    }
+    baseline_map_hashes: set[str] = set()
 
     external_timeout = max(
         5.0,
@@ -669,15 +672,19 @@ def validate_coverage(
                         )
 
             cases.append(result)
-            if result.status == "passed" and result.sha256 is not None:
-                seen_hashes.add(result.sha256)
+            if (
+                case_name in baseline_case_names
+                and result.status == "passed"
+                and result.sha256 is not None
+            ):
+                baseline_map_hashes.add(result.sha256)
 
         all_seed_cases_passed = (
             len(cases) == len(LIBPNG_SEED_CASES)
             and all(case.status == "passed" for case in cases)
         )
 
-        distinct_map_count = len(seen_hashes)
+        distinct_map_count = len(baseline_map_hashes)
         additional_edge_count: int | None = None
 
         if all_seed_cases_passed:

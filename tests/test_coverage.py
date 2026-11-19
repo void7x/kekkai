@@ -26,6 +26,7 @@ from engine.fuzzing.coverage import (
 )
 from engine.fuzzing.smoke import (
     LIBPNG_ADDITIONAL_SEED_CASES,
+    LIBPNG_BASE_SEED_CASES,
     LIBPNG_SEED_CASES,
 )
 
@@ -112,6 +113,7 @@ class CoverageTests(unittest.TestCase):
         timeout_first_map=False,
         wrong_version=False,
         repeat_stable_but_initial_differs=False,
+        baseline_maps_same_with_supplemental_gain=False,
     ):
         if argv[1] == "-h":
             version = "4.34c" if wrong_version else "4.33c"
@@ -139,6 +141,15 @@ class CoverageTests(unittest.TestCase):
 
         if all_maps_same:
             content = b"000001:1\n"
+        elif baseline_maps_same_with_supplemental_gain:
+            baseline_names = {
+                filename for _, filename in LIBPNG_BASE_SEED_CASES
+            }
+            content = (
+                b"000001:1\n"
+                if input_path.name in baseline_names
+                else b"000001:1\n000100:2\n"
+            )
         elif input_path.name == "adam7.png":
             self.adam7_calls += 1
             if unstable_adam7:
@@ -324,6 +335,17 @@ class CoverageTests(unittest.TestCase):
         self.assertFalse(report.passed)
         self.assertEqual(report.distinct_map_count, 1)
         self.assertEqual(report.diversity_status, "failed")
+
+    def test_rejects_identical_baseline_even_when_supplemental_seeds_add_coverage(self):
+        report, _ = self.run_coverage(
+            baseline_maps_same_with_supplemental_gain=True,
+        )
+
+        self.assertFalse(report.passed)
+        self.assertEqual(report.distinct_map_count, 1)
+        self.assertEqual(report.diversity_status, "failed")
+        self.assertGreater(report.additional_edge_count, 0)
+        self.assertEqual(report.repeatability_status, "passed")
 
     def test_rejects_no_coverage_gain_from_supplemental_seeds(self):
         report, _ = self.run_coverage(additional_no_new_edges=True)

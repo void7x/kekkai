@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
 import shutil
@@ -405,6 +407,39 @@ def _overlaps(first: Path, second: Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
+def _rename_directory_noreplace(parent_fd: int, source_name: str, destination_name: str) -> None:
+    """Atomically publish a directory without replacing any destination."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SeedCorpusError(
+            "Atomic no-replace directory publication is unavailable; refusing to publish."
+        )
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        parent_fd, os.fsencode(source_name),
+        parent_fd, os.fsencode(destination_name),
+        1,  # Linux RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in (errno.EEXIST, errno.ENOTEMPTY):
+        raise SeedCorpusError(
+            "Destination appeared during preparation; refusing to overwrite it."
+        )
+    if error_number in (
+        errno.ENOSYS, errno.EINVAL, getattr(errno, "EOPNOTSUPP", errno.EINVAL)
+    ):
+        raise SeedCorpusError(
+            "Atomic no-replace directory publication is unsupported; refusing to publish."
+        )
+    raise OSError(error_number, os.strerror(error_number), destination_name)
+
+
 def prepare_libpng_seed_corpus(
     source_dir: str | Path,
     destination_dir: str | Path,
@@ -495,12 +530,36 @@ def prepare_libpng_seed_corpus(
             + ", ".join(collisions)
         )
 
-    staging_path = Path(tempfile.mkdtemp(
-        prefix=f".{destination.name}.tmp-",
-        dir=parent,
-    ))
+    parent_fd = None
+    staging_path = None
     source_fd = None
     try:
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        parent_info = os.fstat(parent_fd)
+        named_parent_info = os.stat(parent, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(parent_info.st_mode)
+            or (parent_info.st_dev, parent_info.st_ino)
+            != (named_parent_info.st_dev, named_parent_info.st_ino)
+        ):
+            raise SeedCorpusError("Destination parent changed while it was being opened.")
+
+        staging_path = Path(tempfile.mkdtemp(
+            prefix=f".{destination.name}.tmp-",
+            dir=parent,
+        ))
+        staging_parent_info = os.stat(staging_path.parent, follow_symlinks=False)
+        if (
+            (parent_info.st_dev, parent_info.st_ino)
+            != (staging_parent_info.st_dev, staging_parent_info.st_ino)
+        ):
+            raise SeedCorpusError("Destination parent changed during staging creation.")
         source_flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
@@ -572,17 +631,12 @@ def prepare_libpng_seed_corpus(
         if final_manifest.seed_count != source_manifest.seed_count + len(candidate_bytes):
             raise SeedCorpusError("Prepared corpus has an unexpected seed count.")
 
-        if os.path.lexists(destination):
-            raise SeedCorpusError(f"Destination appeared during preparation: {destination}")
-        os.rename(staging_path, destination)
-        parent_fd = os.open(
-            parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        _rename_directory_noreplace(
+            parent_fd,
+            staging_path.name,
+            destination.name,
         )
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        os.fsync(parent_fd)
 
         return SeedCorpusPreparation(
             destination=destination,
@@ -596,5 +650,7 @@ def prepare_libpng_seed_corpus(
     finally:
         if source_fd is not None:
             os.close(source_fd)
-        if staging_path.exists():
+        if staging_path is not None and staging_path.exists():
             shutil.rmtree(staging_path, ignore_errors=True)
+        if parent_fd is not None:
+            os.close(parent_fd)

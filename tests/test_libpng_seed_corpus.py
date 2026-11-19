@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from engine.evidence.seed_manifest import build_seed_manifest
 from engine.fuzzing.libpng_seed_corpus import (
@@ -100,6 +101,28 @@ class LibpngSeedCorpusTests(unittest.TestCase):
             self.prepare()
 
         self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+    def test_atomic_publication_does_not_replace_racing_empty_directory(self) -> None:
+        from engine.fuzzing import libpng_seed_corpus
+
+        original_publish = libpng_seed_corpus._rename_directory_noreplace
+        observed = {}
+
+        def create_racing_destination(parent_fd, source_name, destination_name):
+            self.destination.mkdir()
+            observed["inode"] = self.destination.stat().st_ino
+            return original_publish(parent_fd, source_name, destination_name)
+
+        with patch(
+            "engine.fuzzing.libpng_seed_corpus._rename_directory_noreplace",
+            side_effect=create_racing_destination,
+        ):
+            with self.assertRaisesRegex(SeedCorpusError, "Destination appeared"):
+                self.prepare()
+
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(self.destination.stat().st_ino, observed["inode"])
+        self.assertEqual(list(self.destination.iterdir()), [])
 
     def test_refuses_destination_inside_repository(self) -> None:
         destination = self.repository / "generated-seeds"
